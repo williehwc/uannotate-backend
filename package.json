@@ -1,0 +1,26 @@
+{
+  "name": "uannotate-backend",
+  "version": "1.0.0",
+  "description": "The backend for uAnnotate",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "arr-union": "^3.1.0",
+    "array-intersection": "^0.1.2",
+    "array-unique": "^0.3.2",
+    "body-parser": "^1.15.1",
+    "cors-express": "^0.2.2",
+    "express": "^4.13.4",
+    "mysql": "^2.11.1",
+    "parse-date": "^1.1.0",
+    "request": "^2.72.0",
+    "sha1": "^1.1.1",
+    "standard-deviation": "^1.0.0",
+    "variance": "0.0.1",
+    "xml2js": "^0.4.17"
+  }
+}
