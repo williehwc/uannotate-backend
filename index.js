@@ -1,3 +1,7 @@
+var tokenNodeBB = '0000000000';
+var jwtSecret = '0000000000';
+var jwt = require('jwt-simple');
+
 var express = require('express');
 
 var cors = require('cors-express');
@@ -10,10 +14,10 @@ var jsonParser = bodyParser.json();
 
 var mysql = require('mysql');
 var connection = mysql.createConnection({
-  host              : '138.91.154.46',
-  user              : 'uannotate',
-  password          : 'uannotate',
-  database          : 'uannotate',
+  host              : '0000000000',
+  user              : '0000000000',
+  password          : '0000000000',
+  database          : '0000000000',
   multipleStatements: true
 });
 
@@ -34,8 +38,28 @@ var unique = require('array-unique');
 
 var sd = require('standard-deviation');
 
+var validator = require("email-validator");
+
+var api_key = 'key-0000000000';
+var domain = 'phenotate.org';
+var mailgun = require('mailgun-js')({apiKey: api_key, domain: domain});
+
 process.on('uncaughtException', function (err) {
   console.error(err);
+});
+
+// Ensure uptime
+app.get('/check', function (req, res) {
+  var query = 'SELECT COUNT(*) AS count FROM tokens';
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    if (rows.length > 0) {
+      res.send(rows[0].count + '');
+      res.end();
+    } else {
+      res.sendStatus(403);
+    }
+  });
 });
 
 // Parse JSON and make sure that it's not empty
@@ -76,7 +100,7 @@ app.get('/solr/omim/:query', function (req, res) {
         res.json({ matches: results });
       });
     } else {
-      console.log(error);
+      console.log('error02');
     }
   });
 });
@@ -93,11 +117,11 @@ app.get('/solr/hpo/:query', function (req, res) {
       for (var i = 0; i < body.rows.length; i++) {
         if (req.params.vocabulary == 'hpo' && body.rows[0].term_category.indexOf('HP:0000118') == -1)
           continue;
-        results.push(body.rows[i].name);
+        results.push(body.rows[i].name + ' <a class="goto-browser" title="Use phenotype browser"><i class="fa fa-info-circle" aria-hidden="true"></i></a>');
       }
       res.json({ matches: results });
     } else {
-      console.log(error);
+      console.log('error03');
     }
   });
 });
@@ -113,7 +137,7 @@ app.post('/definition', function (req, res) {
     if (!error && response.statusCode == 200) {
       res.json(body.rows[0]);
     } else {
-      console.log(error);
+      console.log('error04');
     }
   });
 });
@@ -121,7 +145,7 @@ app.post('/definition', function (req, res) {
 // HPO definitions lookup
 app.post('/definitions', function (req, res) {
   var phenotypeNames = req.body.phenotypeNames;
-  var requestURL = 'https://phenotips.org/bin/get/PhenoTips/SolrService?q=HP&fq=id:(%22';
+  var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?q=HP&fq=id:(%22';
   for (var i = 0; i < phenotypeNames.length; i++) {
     if (i != 0)
       requestURL += '%22%20OR%20%22';
@@ -135,7 +159,71 @@ app.post('/definitions', function (req, res) {
     if (!error && response.statusCode == 200) {
       res.json(body);
     } else {
-      console.log(error);
+      console.log('error05');
+    }
+  });
+});
+
+// Browse phenotype PART 1
+app.post('/browse', function (req, res, next) {
+  var requestURL;
+  // Definition & more general phenotypes
+  if (req.body.hpo) {
+    var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=hpo&q=HP&fq=id:(%22' + req.body.hpo + '%22)';
+  } else {
+    var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=hpo&q=HP&fq=name:(%22' + req.body.name + '%22)';
+  }
+  request({
+      url: requestURL,
+      json: true
+    }, function (error, response, body) {
+    if (!error && response.statusCode == 200) {
+      req.currentPhenotype = body.rows[0];
+      next();
+    } else {
+      console.log('error06');
+    }
+  });
+});
+
+// Browse phenotype PART 2
+app.post('/browse', function (req, res) {
+  var hpo = req.currentPhenotype.id;
+  // More specific phenotypes
+  var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?q=HP&fq=is_a:(%22' + hpo + '%22)&vocabulary=hpo&rows=99';
+  request({
+      url: requestURL,
+      json: true
+    }, function (error, response, body) {
+    if (!error && response.statusCode == 200) {
+      specificPhenotypes = [];
+      for (var i = 0; i < body.rows.length; i++) {
+        specificPhenotypes.push({
+          hpo: body.rows[i].id,
+          name: body.rows[i].name
+        });
+      }
+      generalPhenotypes = [];
+      for (var i = 0; i < req.currentPhenotype.is_a.length; i++) {
+        var split = req.currentPhenotype.is_a[i].split(' ! ');
+        if (req.currentPhenotype.id != "HP:0000118") {
+          generalPhenotypes.push({
+            hpo: split[0],
+            name: split[1]
+          });
+        }
+      }
+      res.json({
+        hpo: req.currentPhenotype.id,
+        name: req.currentPhenotype.name,
+        definition: req.currentPhenotype.def,
+        synonym: req.currentPhenotype.synonym,
+        comment: req.currentPhenotype.comment,
+        generalPhenotypes: generalPhenotypes,
+        specificPhenotypes: specificPhenotypes
+      });
+    } else {
+      console.log('error07');
     }
   });
 });
@@ -167,11 +255,11 @@ app.get('/entrez/:query', function (req, res) {
             res.json({ matches: articles });
           });
         } else {
-          console.log(error);
+          console.log('error08');
         }
       });
     } else {
-      console.log(error);
+      console.log('error09');
     }
   });
 });
@@ -193,33 +281,40 @@ app.post('/efetch', function (req, res) {
         res.json(response);
       });
     } else {
-      console.log(error);
+      console.log('error10');
     }
   });
 });
 
 // Routes requiring user to be logged in
 app.post('/restricted/*', function (req, res, next) {
-  if (!req.body.token)
+  if (req.body.link) {
+    req.userID = -1;
+    req.userLevel = -1;
+    req.shareLink = connection.escape(req.body.link);
+    next();
+  } else if (!req.body.token) {
     return res.sendStatus(401);
-  var query = 'SELECT user_id FROM tokens WHERE token = ' + connection.escape(req.body.token);
-  connection.query(query, function(err, rows) {
-    if (err) throw err;
-    if (rows.length > 0 && rows[0].user_id != '-1') {
-      req.userID = rows[0].user_id;
-      var query = 'SELECT level FROM users WHERE id = ' + req.userID;
-      connection.query(query, function(err, rows) {
-        if (err) throw err;
-        req.userLevel = rows[0].level;
-        next();
-      });
-    } else
-      return res.sendStatus(401);
-  });
+  } else {
+    var query = 'SELECT user_id FROM tokens WHERE token = ' + connection.escape(req.body.token);
+    connection.query(query, function(err, rows) {
+      if (err) throw err;
+      if (rows.length > 0 && rows[0].user_id != '-1') {
+        req.userID = rows[0].user_id;
+        var query = 'SELECT level FROM users WHERE id = ' + req.userID;
+        connection.query(query, function(err, rows) {
+          if (err) throw err;
+          req.userLevel = rows[0].level;
+          next();
+        });
+      } else
+        return res.sendStatus(401);
+    });
+  }
 });
 
 app.post('*/student/*', jsonParser, function (req, res, next) {
-  if (req.userLevel > 0)
+  if (req.userLevel !== 0)
     return res.sendStatus(403);
   next();
 });
@@ -236,6 +331,8 @@ app.post('/signup', function (req, res, next) {
   var password = connection.escape(sha1(req.body.email + req.body.password));
   var query0 = 'SELECT * FROM users WHERE email = ' + email + '; ';
   var query1 = 'SELECT * FROM `known_profs` WHERE email = ' + email + '; ';
+  if (!validator.validate(req.body.email))
+    return res.json({ loginValid: false });
   connection.query(query0 + query1, function(err, rows) {
     if (err) throw err;
     if (rows[0].length > 0) {
@@ -247,26 +344,63 @@ app.post('/signup', function (req, res, next) {
     } else {
       var userLevel = 0;
     }
-    var query = 'INSERT INTO users (`full_name`, `email`, `password`, `level`) VALUES (' + name + ',' + email + ',' + password + ', ' + userLevel + ')'
-    connection.query(query);
-    next();
+    request.post({
+      url: 'http://community.phenotate.org/api/v1/users/',
+      json: true,
+      auth: {
+        'bearer': tokenNodeBB
+      },
+      body: {
+          username: req.body.email.replace('@', '-'),
+          password: sha1(req.body.password),
+          email: req.body.email,
+          _uid: 1
+      }
+    }, function (error, response, body) {
+      var communityUserID = -1;
+      if (!error && response.statusCode == 200) {
+  	    communityUserID = body.payload.uid;
+    	} else {
+        console.log('error11');
+      }
+      if (userLevel > 0) {
+        request.post({
+          url: 'http://community.phenotate.org/api/v1/groups/profs/membership',
+          json: true,
+          auth: {
+            'bearer': tokenNodeBB
+          },
+          body: {
+            _uid: communityUserID
+          }
+        });
+      }
+      var query = 'INSERT INTO users (`full_name`, `email`, `password`, `level`, `community_user_id`) VALUES (' + name + ',' + email + ',' + password + ', ' + userLevel + ', ' + communityUserID + ')'
+      connection.query(query);
+      next();
+    });
   });
 });
 
 app.post(['/login', '/signup'], function (req, res) {
   var email = connection.escape(req.body.email);
   var password = connection.escape(sha1(req.body.email + req.body.password));
-  var query = 'SELECT id FROM users WHERE email = ' + email + ' AND password = ' + password;
+  var query = 'SELECT id, community_user_id FROM users WHERE email = ' + email + ' AND password = ' + password;
   connection.query(query, function(err, rows) {
     if (err) throw err;
     if (rows.length > 0) {
       var userID = rows[0].id;
+      var communityUserID = rows[0].community_user_id;
       query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS new_token FROM tokens WHERE "new_token" NOT IN (SELECT token FROM tokens) LIMIT 1';
       connection.query(query, function(err, rows) {
         if (err) throw err;
         var query = 'INSERT INTO tokens (`token`, `user_id`) VALUES (' + rows[0].new_token + ',' + userID + ')';
         connection.query(query);
-        res.json({loginValid: true, token: rows[0].new_token});
+        res.json({loginValid: true, token: rows[0].new_token, cookie: jwt.encode({
+  	      "id": communityUserID,
+  	      "username": req.body.email.replace('@', '-'),
+  	      "email": req.body.email
+        }, jwtSecret)});
       });
     } else {
       res.json({ loginValid: false });
@@ -282,31 +416,59 @@ app.post('/logout', function(req, res) {
 });
 
 app.post('/restricted/user', function(req, res) {
-  var query = 'SELECT full_name, level FROM users WHERE id = ' + req.userID;
+  var query = 'SELECT full_name, level, email_follow, email_like FROM users WHERE id = ' + req.userID;
   connection.query(query, function(err, rows) {
     if (err) throw err;
-    res.json({name: rows[0].full_name, level: rows[0].level});
+    res.json({
+      name: rows[0].full_name,
+      level: rows[0].level,
+      emailFollow: rows[0].email_follow,
+      emailLike: rows[0].email_like
+    });
   });
 });
 
 app.post('/restricted/change-password', function(req, res) {
-  var query = 'SELECT email FROM users WHERE id = ' + req.userID;
+  var query = 'SELECT email, community_user_id AS communityUserID FROM users WHERE id = ' + req.userID;
   connection.query(query, function(err, rows) {
     if (err) throw err;
+    var communityUserID = rows[0].communityUserID;
     var password = connection.escape(sha1(rows[0].email + req.body.password));
     var newPassword = connection.escape(sha1(rows[0].email + req.body.newPassword));
     var query = 'SELECT email FROM users WHERE id = ' + req.userID + ' AND password = ' + password;
     connection.query(query, function(err, rows) {
       if (err) throw err;
       if (rows.length > 0) {
-        query = 'UPDATE users SET password = ' + newPassword + 'WHERE id = ' + req.userID + ' AND password = ' + password;
+        query = 'UPDATE users SET password = ' + newPassword + ' WHERE id = ' + req.userID + ' AND password = ' + password;
         connection.query(query);
+        /*request.put({
+          url: 'http://community.phenotate.org/api/v1/users/' + communityUserID + '/password',
+          json: true,
+          auth: {
+            'bearer': tokenNodeBB
+          },
+          body: {
+              uid: communityUserID,
+              'new': req.body.newPassword,
+              _uid: 1
+          }
+        });*/
         res.json({passwordValid: true});
       } else {
         res.json({passwordValid: false});
       }
     });
   });
+});
+
+app.post('/restricted/email-prefs', function(req, res) {
+  if (req.body.emailFollow === 0 || req.body.emailFollow === 1) {
+    query = 'UPDATE users SET email_follow = ' + req.body.emailFollow + ' WHERE id = ' + req.userID;
+    connection.query(query);
+  } else if (req.body.emailLike === 0 || req.body.emailLike === 1) {
+    query = 'UPDATE users SET email_like = ' + req.body.emailLike + ' WHERE id = ' + req.userID;
+    connection.query(query);
+  }
 });
 
 app.post('/restricted/prof/new-class', function(req, res) {
@@ -527,18 +689,24 @@ app.post('/restricted/phenository/prof/annotations', function(req, res) {
 });
 
 app.post('/restricted/annotation/*', function(req, res, next) {
-  var annotationID = connection.escape(req.body.annotationID);
-  req.annotationID = annotationID;
-  var query = 'SELECT status, disease_id AS diseaseID FROM annotations WHERE id = ' + annotationID + ' AND (user_id = ' + req.userID;
-  if (req.userLevel > 0)
-    query += ' OR status = 2 OR status = -2)'; // Profs can view students' annotations
-  else
-    query += ' OR id IN (SELECT compare_to_annotation_id FROM annotations WHERE user_id = ' + req.userID + '))';
+  var annotationID = null;
+  if (req.body.annotationID) {
+    annotationID = connection.escape(req.body.annotationID);
+  }
+  var query = 'SELECT id AS annotationID, status, disease_id AS diseaseID FROM annotations WHERE id';
+  if (req.userLevel > 0) {
+    query += ' = ' + annotationID + ' AND (user_id = ' + req.userID + ' OR status = 2 OR status = -2)'; // Profs can view students' annotations
+  } else if (req.shareLink) {
+    query += ' IN (SELECT annotation_id AS annotationID FROM shares WHERE link = ' + req.shareLink + ')';
+  } else {
+    query += ' = ' + annotationID + ' AND (user_id = ' + req.userID + ' OR id IN (SELECT compare_to_annotation_id FROM annotations WHERE user_id = ' + req.userID + ' AND released = 1))';
+  }
   connection.query(query, function(err, rows) {
     if (err) throw err;
     // Check if an annotation exists and can be accessed
     if (rows.length == 0)
       return res.sendStatus(403);
+    req.annotationID = rows[0].annotationID;
     req.annotationStatus = rows[0].status;
     req.diseaseID = rows[0].diseaseID;
     next();
@@ -560,11 +728,7 @@ app.post('/restricted/annotation/edit/*', function(req, res, next) {
 
 app.post('/restricted/annotation/view/full', function(req, res) {
   var annotationID = req.annotationID;
-  var query0 = 'SELECT annotations.id AS annotationID, status, clone_of AS cloneOf, user_id AS userID, full_name AS author, email, DATE_FORMAT(annotations.date_created, \'%Y-%m-%d\') AS dateCreated, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished, disease_id AS diseaseID, diseases.db AS diseaseDB, diseases.db_disease AS dbDisease, diseases.name AS diseaseName, exercises.id AS exerciseID, exercises.name AS exerciseName, score, released, memo FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ' AND (annotations.user_id = ' + req.userID;
-  if (req.userLevel > 0)
-    query0 += ' OR status = 2 OR status = -2);';
-  else
-    query0 += ' OR annotations.id IN (SELECT compare_to_annotation_id FROM annotations WHERE user_id = ' + req.userID + '));';
+  var query0 = 'SELECT annotations.id AS annotationID, status, clone_of AS cloneOf, user_id AS userID, full_name AS author, email, DATE_FORMAT(annotations.date_created, \'%Y-%m-%d\') AS dateCreated, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished, disease_id AS diseaseID, diseases.db AS diseaseDB, diseases.db_disease AS dbDisease, diseases.name AS diseaseName, exercises.id AS exerciseID, exercises.name AS exerciseName, class_id AS classID, score, released, memo, compare_to_annotation_id AS compareToAnnotationID, community_topic_id AS communityTopicID FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ';';
   var query1 = 'SELECT likes.user_id as userID FROM likes INNER JOIN users ON likes.user_id = users.id WHERE annotation_id = ' + annotationID + ';';
   var query2 = 'SELECT annotations.id AS annotationID, user_id AS userID, full_name AS author, email, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE clone_of = ' + annotationID + ' AND status = 2;';
   var query3 = 'SELECT phenotypes.id AS phenotypeID, hpo, observed, frequency, onset, not_ok, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY phenotypeID ASC;';
@@ -572,6 +736,9 @@ app.post('/restricted/annotation/view/full', function(req, res) {
   var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ')';
   connection.query(query0 + query1 + query2 + query3 + query4 + query5, function(err, rows) {
     if (err) throw err;
+    if (rows[0].length == 0) {
+      return res.sendStatus(403);
+    }
     // Process likes
     var likes = 0;
     var liked = false;
@@ -656,6 +823,7 @@ app.post('/restricted/annotation/view/full', function(req, res) {
       },
       exerciseID: rows[0][0].exerciseID,
       exerciseName: rows[0][0].exerciseName,
+      classID: rows[0][0].classID,
       likes: likes,
       liked: liked,
       clones: clones,
@@ -664,7 +832,9 @@ app.post('/restricted/annotation/view/full', function(req, res) {
       exerciseAnnotations: exerciseAnnotations,
       score: (rows[0][0].released == 1) ? rows[0][0].score : null,
       released: (rows[0][0].released == 1) ? true : false,
-      memo: (rows[0][0].released == 1) ? rows[0][0].memo : null
+      memo: (rows[0][0].released == 1) ? rows[0][0].memo : null,
+      compareToAnnotationID: rows[0][0].compareToAnnotationID,
+      communityTopicID: rows[0][0].communityTopicID
     };
     return res.json(annotation);
   });
@@ -689,12 +859,24 @@ app.post('/restricted/annotation/edit/phenotype/add', function(req, res) {
         // Phenotypic abnormalities only
         if (body.rows[0].term_category.indexOf('HP:0000118') == -1)
           return res.sendStatus(403);
-        query = 'INSERT INTO phenotypes (annotation_id, hpo) VALUES (' + annotationID + ',' + hpoID + ')';
-        connection.query(query);
-        res.json({ success: true });
+        if (!req.body.phenotypeID) {
+          //Add phenotype from scratch
+          query = 'INSERT INTO phenotypes (annotation_id, hpo) VALUES (' + annotationID + ',' + hpoID + ')';
+          connection.query(query);
+          res.json({ success: true });
+        } else {
+          // If req.phenotypeID is set, we are changing phenotypes.
+          query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, frequency, onset, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ', ' + hpoID + ', observed, frequency, onset, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM phenotypes WHERE id = ' + req.body.phenotypeID;
+          connection.query(query, function(err, result) {
+            // Update citations
+            query = 'UPDATE citations SET phenotype_id = ' + result.insertId + ' WHERE phenotype_id = ' + req.body.phenotypeID;
+            connection.query(query);
+            res.json({ success: true });
+          });
+        }
       });
     } else {
-      console.log(error);
+      console.log('error12');
     }
   });
 });
@@ -795,7 +977,7 @@ app.post('/restricted/annotation/edit/ref/add', function(req, res) {
         });
       });
     } else {
-      console.log(error);
+      console.log('error13');
     }
   });
 });
@@ -906,7 +1088,7 @@ app.post('/restricted/annotation/edit/prof/publish', function(req, res, next) {
   });
 });
 
-app.post('/restricted/annotation/edit/prof/publish', function(req, res) {
+app.post('/restricted/annotation/edit/prof/publish', function(req, res, next) {
   var annotationID = req.annotationID;
   // Check if there is an exact duplicate
   var query0 = 'SELECT hpo, frequency, onset, observed FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY hpo ASC;';
@@ -938,10 +1120,56 @@ app.post('/restricted/annotation/edit/prof/publish', function(req, res) {
         connection.query(query);
         query = 'INSERT INTO likes (`user_id`, `annotation_id`) VALUES (' + req.userID + ',' + annotationID + ')';
         connection.query(query);
-        return res.json({
-          success: true
+        next();
+      }
+    });
+  });
+});
+
+app.post('/restricted/annotation/edit/prof/publish', function(req, res) {
+  // Send emails
+  var annotationID = req.annotationID;
+  // Author and disease info
+  var query = 'SELECT full_name AS author, disease_id AS diseaseID, diseases.name AS diseaseName, diseases.db AS diseaseDB, diseases.db_disease AS dbDisease FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID;
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    var author = rows[0].author;
+    var diseaseID = rows[0].diseaseID;
+    var diseaseName = rows[0].diseaseName;
+    var diseaseDB = rows[0].diseaseDB;
+    var dbDisease = rows[0].dbDisease;
+    // Follow
+    var query0 = 'SELECT full_name AS name, email FROM users INNER JOIN follows ON users.id = follows.user_id WHERE db = ' + connection.escape(diseaseDB) + ' AND db_disease = ' + dbDisease + ' AND email_follow = 1 AND users.id != ' + req.userID + ';';
+    // Like
+    var query1 = 'SELECT full_name AS name, email FROM users INNER JOIN likes ON users.id = likes.user_id INNER JOIN annotations ON likes.annotation_id = annotations.id WHERE disease_id = ' + diseaseID + ' AND email_like = 1 AND users.id != ' + req.userID;
+    connection.query(query0 + query1, function(err, rows) {
+      var alreadyEmailed = [];
+      var toEmail = rows[0].concat(rows[1]);
+      for (var i = 0; i < toEmail.length; i++) {
+        // Don't send duplicate emails
+        if (alreadyEmailed.indexOf(toEmail[i].email) === -1) {
+          alreadyEmailed.push(toEmail[i].email);
+        } else {
+          continue;
+        }
+        // Full name
+        var fullName = toEmail[i].name.substr(0, toEmail[i].name.indexOf(' '));
+        if (!fullName)
+          fullName = toEmail[i].name;
+        // Send email
+        mailgun.messages().send({
+          from: 'Phenotate <notifications@phenotate.org>',
+          to: toEmail[i].email,
+          subject: 'Phenotate Notification',
+          text: 'Hi ' + fullName + ',\n' + author + ' has created a new annotation (' + annotationID + ') for ' + diseaseName + '. You can view it at http://app.phenotate.org/dashboard/in-progress/' + annotationID + '\nCheers,\nPhenotate'
+        }, function (error, body) {
+          if (error)
+            console.log(error);
+          if (body)
+            console.log(body);
         });
       }
+      return res.json({ success: true });
     });
   });
 });
@@ -967,9 +1195,9 @@ app.post('/restricted/annotation/prof/like', function(req, res) {
 app.post('/restricted/annotation/prof/clone', function(req, res) {
   var annotationID = req.annotationID;
   // In-progress annotations cannot be cloned
-  if (req.annotationStatus == 1)
+  if (req.annotationStatus < 2)
     return res.sendStatus(403);
-  var query = 'INSERT INTO annotations (disease_id, user_id, clone_of, status) SELECT disease_id, user_id, id, 1 FROM annotations WHERE id = ' + annotationID;
+  var query = 'INSERT INTO annotations (disease_id, user_id, clone_of, status) SELECT disease_id, ' + req.userID + ', id, 1 FROM annotations WHERE id = ' + annotationID;
   connection.query(query, function(err, result) {
     if (err) throw err;
     var newAnnotationID = result.insertId;
@@ -980,6 +1208,119 @@ app.post('/restricted/annotation/prof/clone', function(req, res) {
     query = 'INSERT INTO citations (ref_id, phenotype_id) SELECT refs.id, phenotypes.id FROM citations INNER JOIN phenotypes ON citations.phenotype_id = phenotypes.prev_id INNER JOIN refs ON citations.ref_id = refs.prev_id WHERE phenotypes.annotation_id = ' + newAnnotationID;
     connection.query(query);
     res.json({ annotationID: newAnnotationID });
+  });
+});
+
+app.post('/restricted/annotation/prof/share', function(req, res) {
+  var annotationID = req.annotationID;
+  var url = 'http://app.phenotate.org/share/';
+  if (req.annotationStatus < 2)
+    return res.sendStatus(403);
+  var query = 'SELECT link FROM shares WHERE annotation_id = ' + annotationID + ' AND user_id = ' + req.userID;
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    if (rows.length > 0)
+      return res.json({ link: url + rows[0].link });
+    query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS new_link FROM shares WHERE "new_link" NOT IN (SELECT link FROM shares) LIMIT 1';
+    connection.query(query, function(err, rows) {
+      if (err) throw err;
+      var query = 'INSERT INTO shares (`user_id`, `annotation_id`, `link`) VALUES (' + req.userID + ',' + annotationID + ',' + rows[0].new_link + ')';
+      connection.query(query);
+      return res.json({ link: url + rows[0].new_link });
+    });
+  });
+});
+
+app.post('/restricted/annotation/prof/unshare', function(req, res) {
+  var annotationID = req.annotationID;
+  if (req.annotationStatus < 2)
+    return res.sendStatus(403);
+  var query = 'DELETE FROM shares WHERE annotation_id = ' + annotationID + ' AND user_id = ' + req.userID;
+  connection.query(query);
+  res.json({ success: true });
+});
+
+app.post('/restricted/annotation/prof/discuss', function(req, res) {
+  var annotationID = req.annotationID;
+  if (req.annotationStatus < 2)
+    return res.sendStatus(403);
+  var query0 = 'SELECT clone_of AS cloneOf, diseases.name AS diseaseName, email, full_name AS userName, community_user_id AS communityUserID FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE status = 2 AND annotations.id = ' + annotationID + ';';
+  var query1 = 'SELECT community_user_id AS communityUserID FROM users WHERE id = ' + req.userID;
+  connection.query(query0 + query1, function(err, rows) {
+    if (err) throw err;
+    if (rows.length < 0)
+      return res.sendStatus(403);
+    var content = 'Discussing [annotation ' + annotationID + '](http://app.phenotate.org/dashboard/in-progress/' + annotationID + ') by ' + rows[0][0].userName + ' <' + rows[0][0].email + '>';
+    if (rows[0][0].cloneOf)
+      content += '\nThis annotation is based on [annotation ' + rows[0][0].cloneOf + '](http://app.phenotate.org/dashboard/in-progress/' + rows[0][0].cloneOf + ')';
+    request({
+      url: 'http://community.phenotate.org/api/v1/topics/',
+      json: true,
+      method: 'POST',
+      auth: {
+        'bearer': tokenNodeBB
+      },
+      body: {
+        cid: 5,
+        title: '[Annotation ' + annotationID + '] ' + rows[0][0].diseaseName,
+        content: content,
+        _uid: 1
+      }
+    }, function (error, response, body) {
+      if (!error && response.statusCode == 200) {
+        var communityTopicID = body.payload.topicData.tid;
+        // Post reply
+        request({
+          url: 'http://community.phenotate.org/api/v1/topics/' + communityTopicID,
+          json: true,
+          method: 'POST',
+          auth: {
+            'bearer': tokenNodeBB
+          },
+          body: {
+            content: req.body.message,
+            _uid: rows[1][0].communityUserID
+          }
+        }, function (error, response, body) {
+          if (!error && response.statusCode == 200) {
+            // Update database
+            query = 'UPDATE annotations SET community_topic_id = ' + communityTopicID + ' WHERE id = ' + annotationID;
+            connection.query(query);
+            // Subscribe annotation author
+            request({
+              url: 'http://community.phenotate.org/api/v1/topics/' + communityTopicID + '/follow',
+              json: true,
+              method: 'POST',
+              auth: {
+                'bearer': tokenNodeBB
+              },
+              body: {
+                _uid: rows[0][0].communityUserID
+              }
+            });
+            // Respond with topic ID
+            res.json({ communityTopicID: communityTopicID });
+          } else {
+            request({
+              url: 'http://community.phenotate.org/api/v1/topics/' + communityTopicID,
+              json: true,
+              method: 'DELETE',
+              auth: {
+                'bearer': tokenNodeBB
+              },
+              body: {
+                _uid: 1
+              }
+            });
+            console.log('error14');
+            return res.sendStatus(403);
+          }
+        });
+      } else {
+        console.log('error15');
+        return res.sendStatus(403);
+      }
+    });
   });
 });
 
@@ -1314,7 +1655,7 @@ app.post('/restricted/annotation/compare', function(req, res) {
   };
   // Check if compareToAnnotationID is valid, and, if not, look for a suitable one
   var annotationID = req.annotationID;
-  var compareToAnnotationID = connection.escape(req.body.compareToAnnotationID);
+  var compareToAnnotationID = req.body.compareToAnnotationID;
   var query0 = 'SELECT id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ') AND id != ' + annotationID + ';';
   var query1 = 'SELECT id AS annotationID, clone_of AS cloneOf, compare_to_annotation_id AS compareToAnnotationID, status FROM annotations WHERE id = ' + annotationID + ';';
   var query2 = 'SELECT id AS annotationID, compare_to_annotation_id AS compareToAnnotationID FROM annotations WHERE compare_to_annotation_id = ' + annotationID;
@@ -1333,12 +1674,14 @@ app.post('/restricted/annotation/compare', function(req, res) {
         mostLikesAnnotationID = rows[0][i].annotationID;
       }
     }
-    if (rows[1][0].cloneOf && !found)
-      compareToAnnotationID = rows[1][0].cloneOf;
-    else if (rows[1][0].compareToAnnotationID && !found)
-      compareToAnnotationID = rows[1][0].compareToAnnotationID;
-    else if (!found)
-      compareToAnnotationID = mostLikesAnnotationID;
+    if (annotationID != compareToAnnotationID && !found) {
+      if (rows[1][0].cloneOf && !found)
+        compareToAnnotationID = rows[1][0].cloneOf;
+      else if (rows[1][0].compareToAnnotationID && !found)
+        compareToAnnotationID = rows[1][0].compareToAnnotationID;
+      else if (annotationID != compareToAnnotationID && !found)
+        compareToAnnotationID = mostLikesAnnotationID;
+    }
     if (req.userLevel < 1) {
       if (rows[1][0].compareToAnnotationID) {
         compareToAnnotationID = rows[1][0].compareToAnnotationID;
@@ -1350,15 +1693,15 @@ app.post('/restricted/annotation/compare', function(req, res) {
         compareToAnnotationID = rows[2][0].compareToAnnotationID;
       }
     }
-    var query0 = 'SELECT annotations.id AS annotationID, exercise_id AS exerciseID, exercises.name AS exerciseName, diseases.name AS diseaseName, db AS diseaseDB, status, full_name AS userName, score, released, memo, compare_to_annotation_id AS compareToAnnotationID FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ';';
+    var query0 = 'SELECT annotations.id AS annotationID, exercise_id AS exerciseID, class_id AS classID, exercises.name AS exerciseName, diseases.name AS diseaseName, db AS diseaseDB, status, full_name AS userName, score, released, memo, compare_to_annotation_id AS compareToAnnotationID FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ';';
     var query1 = 'SELECT annotations.id AS annotationID, full_name AS userName FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ') AND status = -2 GROUP BY user_id;';
-    var query2 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
+    var query2 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND annotations.id != ' + annotationID + ' AND disease_id IN (SELECT disease_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
     var query3 = 'SELECT hpo, observed, frequency, onset, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND system IS NOT NULL;';
     var query4 = query3;
     if (rows[0].length > 0)
       query4 = 'SELECT hpo, observed, frequency, onset, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + compareToAnnotationID + ' AND system IS NOT NULL;';
     var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
-    var query6 = 'SELECT hpo AS systemHPO, score AS systemScore FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID;
+    var query6 = 'SELECT hpo AS systemHPO, score AS systemScore, memo AS systemComment FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID;
     connection.query(query0 + query1 + query2 + query3 + query4 + query5 + query6, function(err, rows) {
       if (err) throw err;
       // All submissions and annotations
@@ -1432,20 +1775,23 @@ app.post('/restricted/annotation/compare', function(req, res) {
       var systems = [];
       for (var i = 0; i < systemHPOs.length; i++) {
         var systemScore = null;
+        var systemComment = null;
         for (var j = 0; j < rows[6].length; j++) {
           if (rows[6][j].systemHPO == systemHPOs[i]) {
             systemScore = rows[6][j].systemScore;
+            systemComment = rows[6][j].systemComment;
             break;
           }
         }
         systems.push({
           systemName: 'Loading…',
           systemHPO: systemHPOs[i],
-          systemScore: (systemScore != null) ? systemScore : -1,
+          systemScore: (systemScore != null && (req.userLevel > 0 || rows[0][0].released == 1)) ? systemScore : -1,
           systemScoreSet: (systemScore != null),
           systemWeight: -1,
           phenotypes: phenotypes[i],
-          compareToPhenotypes: compareToPhenotypes[i]
+          compareToPhenotypes: (req.userLevel > 0 || rows[0][0].released == 1) ? compareToPhenotypes[i] : [],
+          systemComment: (req.userLevel > 0 || rows[0][0].released == 1) ? systemComment : null
         });
       }
       // Diseases
@@ -1459,9 +1805,10 @@ app.post('/restricted/annotation/compare', function(req, res) {
       // Response
       var comparison = {
         annotationID: rows[0][0].annotationID,
-        compareToAnnotationID: compareToAnnotationID,
+        compareToAnnotationID: parseInt(compareToAnnotationID, 10),
         exerciseID: rows[0][0].exerciseID,
         exerciseName: rows[0][0].exerciseName,
+        classID: rows[0][0].classID,
         diseaseDB: rows[0][0].diseaseDB,
         diseaseName: rows[0][0].diseaseName,
         status: rows[0][0].status,
@@ -1469,14 +1816,14 @@ app.post('/restricted/annotation/compare', function(req, res) {
         submissions: submissions,
         annotations: annotations,
         diseases: diseases,
-        score: rows[0][0].score,
+        score: (req.userLevel > 0 || rows[0][0].released == 1) ? rows[0][0].score : 0,
         released: (rows[0][0].released == 1),
         memo: rows[0][0].memo,
         standard: (compareToAnnotationID == rows[0][0].compareToAnnotationID),
         systems: systems
       };
       // UI score
-      var requestURL = 'https://phenotips.org/bin/get/PhenoTips/SolrService?q=HP&fq=id:(%22';
+      var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?q=HP&fq=id:(%22';
       var usedPhenotypes = [];
       for (var i = 0; i < rows[3].length; i++) {
         if (i != 0)
@@ -1506,20 +1853,24 @@ app.post('/restricted/annotation/compare', function(req, res) {
             for (var j = 0; j < body.rows.length; j++) {
               for (var k = 0; k < comparison.systems[i].phenotypes.length; k++) {
                 if (body.rows[j].id == comparison.systems[i].phenotypes[k].hpo && comparison.systems[i].phenotypes[k].observed == 1) {
+                  termCategoryObserved.push(comparison.systems[i].phenotypes[k].hpo);
                   termCategoryObserved = termCategoryObserved.concat(body.rows[j].term_category);
                   numPhenotypesInclDuplicatesObserved++;
                 }
                 if (body.rows[j].id == comparison.systems[i].phenotypes[k].hpo && comparison.systems[i].phenotypes[k].observed == 0) {
+                  termCategoryNotObserved.push(comparison.systems[i].phenotypes[k].hpo);
                   termCategoryNotObserved = termCategoryNotObserved.concat(body.rows[j].term_category);
                   numPhenotypesInclDuplicatesNotObserved++;
                 }
               }
               for (var k = 0; k < comparison.systems[i].compareToPhenotypes.length; k++) {
                 if (body.rows[j].id == comparison.systems[i].compareToPhenotypes[k].hpo && comparison.systems[i].compareToPhenotypes[k].observed == 1) {
+                  compareToTermCategoryObserved.push(comparison.systems[i].compareToPhenotypes[k].hpo);
                   compareToTermCategoryObserved = compareToTermCategoryObserved.concat(body.rows[j].term_category);
                   numPhenotypesInclDuplicatesObserved++;
                 }
                 if (body.rows[j].id == comparison.systems[i].compareToPhenotypes[k].hpo && comparison.systems[i].compareToPhenotypes[k].observed == 0) {
+                  compareToTermCategoryNotObserved.push(comparison.systems[i].compareToPhenotypes[k].hpo);
                   compareToTermCategoryNotObserved = compareToTermCategoryNotObserved.concat(body.rows[j].term_category);
                   numPhenotypesInclDuplicatesNotObserved++;
                 }
@@ -1552,10 +1903,30 @@ app.post('/restricted/annotation/compare', function(req, res) {
           }
           res.json(comparison);
         } else {
-          console.log(error);
+          console.log('error16');
         }
       });
     });
+  });
+});
+
+app.post('/restricted/annotation/prof/comment/system', function(req, res) {
+  var annotationID = req.annotationID;
+  var compareToAnnotationID = connection.escape(req.body.compareToAnnotationID);
+  var systemHPO = connection.escape(req.body.hpo);
+  var comment = connection.escape(req.body.comment);
+  // First, check if compareToAnnotationID is valid (i.e. published and of the same disease)
+  // Also, check if system HPO is valid (i.e. one or more phenotypes belong to it)
+  var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
+  var query1 = 'SELECT id FROM phenotypes WHERE system = ' + systemHPO + ' AND (annotation_id = ' + annotationID + ' OR annotation_id = ' + compareToAnnotationID + ')';
+  connection.query(query0 + query1, function(err, rows) {
+    if (err) throw err;
+    if ((annotationID == compareToAnnotationID || rows[0].length > 0) && rows[1].length > 0) {
+      var query = 'UPDATE system_scores SET memo = NULL WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ' AND hpo = ' + systemHPO;
+      if (comment.length > 0)
+        query = 'UPDATE system_scores SET memo = ' + comment + ' WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ' AND hpo = ' + systemHPO;
+      connection.query(query);
+    }
   });
 });
 
@@ -1570,13 +1941,15 @@ app.post('/restricted/annotation/prof/score/system', function(req, res) {
   // First, check if compareToAnnotationID is valid (i.e. published and of the same disease)
   // Also, check if system HPO is valid (i.e. one or more phenotypes belong to it)
   var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
-  var query1 = 'SELECT id FROM phenotypes WHERE system = ' + systemHPO + ' AND (annotation_id = ' + annotationID + ' OR annotation_id = ' + compareToAnnotationID + ')';
-  var query2 = 'SELECT score FROM system_scores'
-  connection.query(query0 + query1, function(err, rows) {
+  var query1 = 'SELECT id FROM phenotypes WHERE system = ' + systemHPO + ' AND (annotation_id = ' + annotationID + ' OR annotation_id = ' + compareToAnnotationID + ');';
+  var query2 = 'SELECT memo FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ' AND hpo = ' + systemHPO + ' AND memo IS NOT NULL';
+  connection.query(query0 + query1 + query2, function(err, rows) {
     if (err) throw err;
-    if (rows[0].length > 0 && rows[1].length > 0) {
+    if ((annotationID == compareToAnnotationID || rows[0].length > 0) && rows[1].length > 0) {
       var query0 = 'DELETE FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ' AND hpo = ' + systemHPO + ';';
       var query1 = 'INSERT INTO system_scores (annotation_id, compare_to_annotation_id, hpo, score) VALUES (' + annotationID + ', ' + compareToAnnotationID + ', ' + systemHPO + ', ' + score + ')';
+      if (rows[2].length > 0)
+        query1 = 'INSERT INTO system_scores (annotation_id, compare_to_annotation_id, hpo, score, memo) VALUES (' + annotationID + ', ' + compareToAnnotationID + ', ' + systemHPO + ', ' + score + ', ' + connection.escape(rows[2][0].memo) + ')';
       connection.query(query0 + query1);
       if (removeCompareToAnnotation) {
         var query = 'UPDATE annotations SET compare_to_annotation_id = NULL WHERE status = -2 AND id = ' + annotationID;
@@ -1597,10 +1970,10 @@ app.post('/restricted/annotation/prof/score/save', function(req, res) {
   if (req.body.score < 0 || req.body.score > 1)
     return res.sendStatus(403);
   if (req.body.compareToAnnotationID) {
-    var query = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
+    var query = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ');';
     connection.query(query, function(err, rows) {
       if (err) throw err;
-      if (rows.length > 0) {
+      if (annotationID == compareToAnnotationID || rows.length > 0) {
         var query = 'UPDATE annotations SET score = ' + score + ', memo = ' + memo + ', compare_to_annotation_id = ' + compareToAnnotationID + ', date_graded_released = NOW() WHERE status = -2 AND id = ' + annotationID;
         connection.query(query);
         res.json({ success: true });
