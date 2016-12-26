@@ -21,6 +21,7 @@ var connection = mysql.createConnection({
   multipleStatements: true
 });
 
+// Prevent MySQL timeout
 setInterval(function () {
   connection.query('SELECT 1');
 }, 1000);
@@ -50,7 +51,9 @@ process.on('uncaughtException', function (err) {
 
 // Ensure uptime
 app.get('/check', function (req, res) {
-  var query = 'SELECT COUNT(*) AS count FROM tokens';
+  var query = 'DELETE FROM tokens WHERE DATEDIFF(CURDATE(), date_created) > 7';
+  connection.query(query);
+  query = 'SELECT COUNT(*) AS count FROM tokens';
   connection.query(query, function(err, rows) {
     if (err) throw err;
     if (rows.length > 0) {
@@ -545,6 +548,7 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
     }, function (error, response, body) {
     if (!error && response.statusCode == 200 && body.rows.length > 0) {
       var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id;
+      req.dbDisease = body.rows[0].id;
       connection.query(query, function(err, rows) {
         if (err) throw err;
         if (rows.length == 0) {
@@ -582,7 +586,7 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res) {
     for (var i = 0; i < actualSymptoms.length; i++) {
       if (insertedSymptoms.indexOf(actualSymptoms[i]) > 0)
         continue;
-      var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) VALUES (' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1)';
+      var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM imports WHERE db = ' + connection.escape(req.body.vocabulary.toUpperCase()) + ' AND db_disease = ' + req.dbDisease + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ' LIMIT 1; INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1 FROM phenotypes WHERE NOT EXISTS (SELECT * FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ') LIMIT 1';
       connection.query(query);
       insertedSymptoms.push(actualSymptoms[i]);
     }
@@ -731,7 +735,7 @@ app.post('/restricted/annotation/view/full', function(req, res) {
   var query0 = 'SELECT annotations.id AS annotationID, status, clone_of AS cloneOf, user_id AS userID, full_name AS author, email, DATE_FORMAT(annotations.date_created, \'%Y-%m-%d\') AS dateCreated, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished, disease_id AS diseaseID, diseases.db AS diseaseDB, diseases.db_disease AS dbDisease, diseases.name AS diseaseName, exercises.id AS exerciseID, exercises.name AS exerciseName, class_id AS classID, score, released, memo, compare_to_annotation_id AS compareToAnnotationID, community_topic_id AS communityTopicID FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ';';
   var query1 = 'SELECT likes.user_id as userID FROM likes INNER JOIN users ON likes.user_id = users.id WHERE annotation_id = ' + annotationID + ';';
   var query2 = 'SELECT annotations.id AS annotationID, user_id AS userID, full_name AS author, email, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE clone_of = ' + annotationID + ' AND status = 2;';
-  var query3 = 'SELECT phenotypes.id AS phenotypeID, hpo, observed, frequency, onset, not_ok, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY phenotypeID ASC;';
+  var query3 = 'SELECT phenotypes.id AS phenotypeID, hpo, observed, frequency, frequency_to, onset, onset_to, not_ok, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY phenotypeID ASC;';
   var query4 = 'SELECT refs.id AS refID, pmid FROM refs WHERE annotation_id = ' + annotationID + ' ORDER BY refs.id ASC;';
   var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ')';
   connection.query(query0 + query1 + query2 + query3 + query4 + query5, function(err, rows) {
@@ -768,7 +772,9 @@ app.post('/restricted/annotation/view/full', function(req, res) {
         hpo: rows[3][i].hpo,
         observed: rows[3][i].observed,
         frequency: rows[3][i].frequency,
+        frequencyTo: rows[3][i].frequency_to,
         onset: rows[3][i].onset,
+        onsetTo: rows[3][i].onset_to,
         phenotypeName: 'Loading…',
         phenotypeDefinition: null,
         display: true,
@@ -866,7 +872,7 @@ app.post('/restricted/annotation/edit/phenotype/add', function(req, res) {
           res.json({ success: true });
         } else {
           // If req.phenotypeID is set, we are changing phenotypes.
-          query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, frequency, onset, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ', ' + hpoID + ', observed, frequency, onset, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM phenotypes WHERE id = ' + req.body.phenotypeID;
+          query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ', ' + hpoID + ', observed, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM phenotypes WHERE id = ' + req.body.phenotypeID;
           connection.query(query, function(err, result) {
             // Update citations
             query = 'UPDATE citations SET phenotype_id = ' + result.insertId + ' WHERE phenotype_id = ' + req.body.phenotypeID;
@@ -896,24 +902,33 @@ app.post('/restricted/annotation/edit/phenotype/frequency', function(req, res) {
   var annotationID = req.annotationID;
   var phenotypeID = connection.escape(req.body.phenotypeID);
   var frequency = connection.escape(req.body.frequency);
-  var query = 'UPDATE phenotypes SET frequency = ' + frequency + ', not_ok = 0 WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
+  var frequencyTo = connection.escape(req.body.frequencyTo);
+  if (frequencyTo != -1 && frequencyTo <= frequency) {
+    return res.sendStatus(403);
+  }
+  var query = 'UPDATE phenotypes SET frequency = ' + frequency + ', frequency_to = ' + frequencyTo + ', not_ok = 0 WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
   connection.query(query, function(err, rows) {
     if (err) throw err;
-    res.json({ phenotypeID: req.body.phenotypeID, frequency: req.body.frequency });
+    res.json({ phenotypeID: req.body.phenotypeID, frequency: req.body.frequency, frequencyTo: req.body.frequencyTo });
   });
 });
 
 app.post('/restricted/annotation/edit/phenotype/onset', function(req, res) {
+  var onsets = ['HP:0030674', 'HP:0003577', 'HP:0003623', 'HP:0003593', 'HP:0011463', 'HP:0003621', 'HP:0003581'];
   var annotationID = req.annotationID;
   var phenotypeID = connection.escape(req.body.phenotypeID);
   var onset = connection.escape(req.body.onset);
+  var onsetTo = connection.escape(req.body.onsetTo);
+  if ((req.body.onsetTo != '-1' && onsets.indexOf(req.body.onset) >= onsets.indexOf(req.body.onsetTo)) || (req.body.onset == '-1' && req.body.onsetTo != '-1')) {
+    return res.sendStatus(403);
+  }
   if (req.body.setOK)
-  	var query = 'UPDATE phenotypes SET onset = ' + onset + ', not_ok = 0 WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
+  	var query = 'UPDATE phenotypes SET onset = ' + onset + ', onset_to = ' + onsetTo + ', not_ok = 0 WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
   else
-  	var query = 'UPDATE phenotypes SET onset = ' + onset + ' WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
+  	var query = 'UPDATE phenotypes SET onset = ' + onset + ', onset_to = ' + onsetTo + ' WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
   connection.query(query, function(err, rows) {
     if (err) throw err;
-    res.json({ phenotypeID: req.body.phenotypeID, onset: req.body.onset });
+    res.json({ phenotypeID: req.body.phenotypeID, onset: req.body.onset, onsetTo: req.body.onsetTo });
   });
 });
 
@@ -1091,14 +1106,14 @@ app.post('/restricted/annotation/edit/prof/publish', function(req, res, next) {
 app.post('/restricted/annotation/edit/prof/publish', function(req, res, next) {
   var annotationID = req.annotationID;
   // Check if there is an exact duplicate
-  var query0 = 'SELECT hpo, frequency, onset, observed FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY hpo ASC;';
+  var query0 = 'SELECT hpo, frequency, frequency_to, onset, onset_to, observed FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY hpo ASC;';
   var query1 = 'SELECT pmid, hpo FROM citations INNER JOIN refs ON citations.ref_id = refs.id INNER JOIN phenotypes ON citations.phenotype_id = phenotypes.id WHERE phenotypes.annotation_id = ' + annotationID + ' ORDER BY pmid ASC, hpo ASC;';
   var query2 = 'SELECT disease_id AS diseaseID FROM annotations WHERE id = ' + annotationID;
   connection.query(query0 + query1 + query2, function(err, rows) {
     if (err) throw err;
     var summary = '';
     for (var i = 0; i < rows[0].length; i++) {
-      summary += rows[0][i].hpo + rows[0][i].frequency + rows[0][i].onset + rows[0][i].observed;
+      summary += rows[0][i].hpo + rows[0][i].frequency + rows[0][i].frequency_to + rows[0][i].onset + rows[0][i].onset_to + rows[0][i].observed;
     }
     for (var i = 0; i < rows[1].length; i++) {
       summary += rows[1][i].pmid + rows[1][i].hpo;
@@ -1201,7 +1216,7 @@ app.post('/restricted/annotation/prof/clone', function(req, res) {
   connection.query(query, function(err, result) {
     if (err) throw err;
     var newAnnotationID = result.insertId;
-    query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, frequency, onset, prev_id, not_ok, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + newAnnotationID + ', hpo, observed, frequency, onset, id, 1, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID;
+    query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, frequency, frequency_to, onset, onset_to, prev_id, not_ok, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + newAnnotationID + ', hpo, observed, frequency, frequency_to, onset, onset_to, id, 1, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID;
     connection.query(query);
     query = 'INSERT INTO refs (annotation_id, pmid, prev_id) SELECT ' + newAnnotationID + ', pmid, id FROM refs WHERE annotation_id = ' + annotationID;
     connection.query(query);
@@ -1377,78 +1392,74 @@ app.post('/restricted/annotation/system', function(req, res, next) {
 });
 
 app.post('/restricted/annotation/compare', function(req, res) {
-  var calculateBonus = function (frequency, compareToFrequency, onset, compareToOnset) {
+  var calculateBonusFrequency = function (frequency, compareToFrequency) {
     var bonus = 0;
+    // Match nearest HPO frequency: stackoverflow.com/questions/8584902/get-closest-number-out-of-array
+    var hpoFrequencies = [-1, 0.01, 0.05, 0.075, 0.33, 0.5, 0.75, 0.9, 1];
+    var closest = hpoFrequencies[0];
+    for (var i = 0; i < hpoFrequencies.length; i++) {
+      if (Math.abs(frequency - hpoFrequencies[i]) < Math.abs(frequency - closest))
+        closest = hpoFrequencies[i];
+    }
+    frequency = closest;
+    closest = hpoFrequencies[0];
+    for (var i = 0; i < hpoFrequencies.length; i++) {
+      if (Math.abs(compareToFrequency - hpoFrequencies[i]) < Math.abs(compareToFrequency - closest))
+        closest = hpoFrequencies[i];
+    }
+    compareToFrequency = closest;
     switch (frequency) {
       case -1:
         switch (compareToFrequency) {
           case -1:
           case 0.05:
-            bonus += 0.5;
-            break;
-          case 0:
-            bonus += 1.5;
+            bonus += 0.005;
             break;
           case 0.01:
-            bonus += 1;
-            break;
-        }
-        break;
-      case 0:
-        switch (compareToFrequency) {
-          case -1:
-          case 0.33:
-          case 0.5:
-            bonus += 1;
-            break;
-          case 0:
-            bonus += 5;
-            break;
-          case 0.75:
-            bonus += 0.5;
+            bonus += 0.01;
             break;
         }
         break;
       case 0.01:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 0.01:
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 0.05:
-            bonus += 2.5;
+            bonus += 0.025;
             break;
         }
         break;
       case 0.05:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 0.01:
           case 0.075:
-            bonus += 3.5;
+            bonus += 0.035;
             break;
           case 0.05:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
       case 0.075:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 0.01:
-            bonus += 1.5;
+            bonus += 0.015;
             break;
           case 0.05:
-            bonus += 4;
+            bonus += 0.04;
             break;
           case 0.075:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
@@ -1456,197 +1467,196 @@ app.post('/restricted/annotation/compare', function(req, res) {
         switch (compareToFrequency) {
           case -1:
           case 0.075:
-            bonus += 1;
+            bonus += 0.01;
             break;
-          case 0:
           case 0.5:
-            bonus += 2.5;
+            bonus += 0.025;
             break;
           case 0.33:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
       case 0.5:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
-          case 0:
           case 0.33:
-            bonus += 2.5;
+            bonus += 0.025;
             break;
           case 0.5:
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 0.75:
-            bonus += 1.5;
+            bonus += 0.015;
             break;
         }
         break;
       case 0.75:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
-            break;
-          case 0:
-            bonus += 1.5;
+            bonus += 0.01;
             break;
           case 0.5:
           case 0.9:
-            bonus += 2.5;
+            bonus += 0.025;
             break;
           case 0.75:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
       case 0.9:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 0.75:
           case 1:
-            bonus += 3.5;
+            bonus += 0.035;
             break;
           case 0.9:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
       case 1:
         switch (compareToFrequency) {
           case -1:
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 0.9:
-            bonus += 3.5;
+            bonus += 0.035;
             break;
           case 1:
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
     }
+    return bonus;
+  };
+  var calculateBonusOnset = function (onset, compareToOnset) {
+    var bonus = 0;
     switch (onset) {
       case '-1':
         switch (compareToOnset) {
           case '-1':
-            bonus += 0.5;
+            bonus += 0.005;
             break;
         }
         break;
       case 'HP:0030674':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0030674':
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 'HP:0003577':
-            bonus += 4.5;
+            bonus += 0.045;
             break;
           case 'HP:0003623':
-            bonus += 1.5;
+            bonus += 0.015;
             break;
         }
         break;
       case 'HP:0003577':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0030674':
-            bonus += 4.5;
+            bonus += 0.045;
             break;
           case 'HP:0003577':
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 'HP:0003623':
-            bonus += 3;
+            bonus += 0.03;
             break;
         }
         break;
       case 'HP:0003623':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0030674':
-            bonus += 2;
+            bonus += 0.02;
             break;
           case 'HP:0003577':
           case 'HP:0003593':
-            bonus += 3;
+            bonus += 0.03;
             break;
           case 'HP:0003623':
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
       case 'HP:0003593':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0003577':
-            bonus += 1.5;
+            bonus += 0.015;
             break;
           case 'HP:0003623':
-            bonus += 3;
+            bonus += 0.03;
             break;
           case 'HP:0003593':
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 'HP:0011463':
-            bonus += 2.5;
+            bonus += 0.025;
             break;
         }
         break;
       case 'HP:0011463':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0003593':
-            bonus += 3;
+            bonus += 0.03;
             break;
           case 'HP:0011463':
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 'HP:0003621':
-            bonus += 2;
+            bonus += 0.02;
             break;
         }
         break;
       case 'HP:0003621':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0011463':
-            bonus += 2.5;
+            bonus += 0.025;
             break;
           case 'HP:0003621':
-            bonus += 5;
+            bonus += 0.05;
             break;
           case 'HP:0003581':
-            bonus += 2;
+            bonus += 0.02;
             break;
         }
         break;
       case 'HP:0003581':
         switch (compareToOnset) {
           case '-1':
-            bonus += 1;
+            bonus += 0.01;
             break;
           case 'HP:0003621':
-            bonus += 2;
+            bonus += 0.02;
             break;
           case 'HP:0003581':
-            bonus += 5;
+            bonus += 0.05;
             break;
         }
         break;
@@ -1696,10 +1706,10 @@ app.post('/restricted/annotation/compare', function(req, res) {
     var query0 = 'SELECT annotations.id AS annotationID, exercise_id AS exerciseID, class_id AS classID, exercises.name AS exerciseName, diseases.name AS diseaseName, db AS diseaseDB, status, full_name AS userName, score, released, memo, compare_to_annotation_id AS compareToAnnotationID FROM annotations LEFT JOIN exercises ON annotations.exercise_id = exercises.id INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON annotations.user_id = users.id WHERE annotations.id = ' + annotationID + ';';
     var query1 = 'SELECT annotations.id AS annotationID, full_name AS userName FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ') AND status = -2 GROUP BY user_id;';
     var query2 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND annotations.id != ' + annotationID + ' AND disease_id IN (SELECT disease_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
-    var query3 = 'SELECT hpo, observed, frequency, onset, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND system IS NOT NULL;';
+    var query3 = 'SELECT hpo, observed, frequency, frequency_to AS frequencyTo, onset, onset_to AS onsetTo, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND system IS NOT NULL;';
     var query4 = query3;
     if (rows[0].length > 0)
-      query4 = 'SELECT hpo, observed, frequency, onset, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + compareToAnnotationID + ' AND system IS NOT NULL;';
+      query4 = 'SELECT hpo, observed, frequency, frequency_to AS frequencyTo, onset, onset_to AS onsetTo, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + compareToAnnotationID + ' AND system IS NOT NULL;';
     var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
     var query6 = 'SELECT hpo AS systemHPO, score AS systemScore, memo AS systemComment FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID;
     connection.query(query0 + query1 + query2 + query3 + query4 + query5 + query6, function(err, rows) {
@@ -1737,7 +1747,9 @@ app.post('/restricted/annotation/compare', function(req, res) {
           hpo: rows[3][i].hpo,
           observed: rows[3][i].observed,
           frequency: rows[3][i].frequency,
+          frequencyTo: rows[3][i].frequencyTo,
           onset: rows[3][i].onset,
+          onsetTo: rows[3][i].onsetTo,
           phenotypeName: 'Loading…',
           phenotypeDefinition: null,
           bonus: false,
@@ -1761,7 +1773,9 @@ app.post('/restricted/annotation/compare', function(req, res) {
           hpo: rows[4][i].hpo,
           observed: rows[4][i].observed,
           frequency: rows[4][i].frequency,
+          frequencyTo: rows[4][i].frequencyTo,
           onset: rows[4][i].onset,
+          onsetTo: rows[4][i].onsetTo,
           phenotypeName: 'Loading…',
           phenotypeDefinition: null,
           specificOnset: rows[4][i].specificOnset,
@@ -1891,7 +1905,35 @@ app.post('/restricted/annotation/compare', function(req, res) {
             for (var j = 0; j < comparison.systems[i].phenotypes.length; j++) {
               for (var k = 0; k < comparison.systems[i].compareToPhenotypes.length; k++) {
                 if (comparison.systems[i].phenotypes[j].observed == 1 && comparison.systems[i].compareToPhenotypes[k].observed == 1 && comparison.systems[i].phenotypes[j].hpo == comparison.systems[i].compareToPhenotypes[k].hpo && comparison.exerciseID != null) {
-                  var bonus = calculateBonus(comparison.systems[i].phenotypes[j].frequency, comparison.systems[i].compareToPhenotypes[k].frequency, comparison.systems[i].phenotypes[j].onset, comparison.systems[i].compareToPhenotypes[k].onset) / 100;
+                  var bonus = 0;
+                  var frequency = comparison.systems[i].phenotypes[j].frequency;
+                  var frequencyTo = comparison.systems[i].phenotypes[j].frequencyTo;
+                  var compareToFrequency = comparison.systems[i].compareToPhenotypes[k].frequency;
+                  var compareToFrequencyTo = comparison.systems[i].compareToPhenotypes[k].frequencyTo;
+                  if (frequencyTo != -1 && compareToFrequencyTo != -1) {
+                    bonus += calculateBonusFrequency(frequency, compareToFrequency) + calculateBonusFrequency(frequencyTo, compareToFrequencyTo);
+                  } else if (frequencyTo == -1 && compareToFrequencyTo != -1) {
+                    bonus += Math.max(calculateBonusFrequency(frequency, compareToFrequency), calculateBonusFrequency(frequency, compareToFrequencyTo));
+                  } else if (frequencyTo != -1 && compareToFrequencyTo == -1) {
+                    bonus += Math.max(calculateBonusFrequency(frequency, compareToFrequency), calculateBonusFrequency(frequencyTo, compareToFrequency));
+                  } else {
+                    bonus += calculateBonusFrequency(frequency, compareToFrequency);
+                  }
+                  var onset = comparison.systems[i].phenotypes[j].onset;
+                  var onsetTo = comparison.systems[i].phenotypes[j].onsetTo;
+                  var compareToOnset = comparison.systems[i].compareToPhenotypes[k].onset;
+                  var compareToOnsetTo = comparison.systems[i].compareToPhenotypes[k].onsetTo;
+                  if (onsetTo != -1 && compareToOnsetTo != -1) {
+                    bonus += calculateBonusOnset(onset, compareToOnset) + calculateBonusOnset(onsetTo, compareToOnsetTo);
+                  } else if (onsetTo == -1 && compareToOnsetTo != -1) {
+                    bonus += Math.max(calculateBonusOnset(onset, compareToOnset), calculateBonusOnset(onset, compareToOnsetTo));
+                  } else if (onsetTo != -1 && compareToOnsetTo == -1) {
+                    bonus += Math.max(calculateBonusOnset(onset, compareToOnset), calculateBonusOnset(onsetTo, compareToOnset));
+                  } else {
+                    bonus += calculateBonusOnset(onset, compareToOnset);
+                  }
+                  console.log(comparison.systems[i].phenotypes[j].hpo);
+                  console.log(bonus);
                   comparison.systems[i].systemScore += bonus;
                   if (bonus >= 0.03)
                     comparison.systems[i].phenotypes[j].bonus = true;
