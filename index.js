@@ -903,7 +903,7 @@ app.post('/restricted/annotation/edit/phenotype/frequency', function(req, res) {
   var phenotypeID = connection.escape(req.body.phenotypeID);
   var frequency = connection.escape(req.body.frequency);
   var frequencyTo = connection.escape(req.body.frequencyTo);
-  if (frequencyTo != -1 && frequencyTo <= frequency) {
+  if ((frequencyTo != -1 && frequencyTo <= frequency) || !(frequency == -1 || (frequency > 0 && frequency <= 1)) || !(frequencyTo == -1 || (frequencyTo > 0 && frequencyTo <= 1))) {
     return res.sendStatus(403);
   }
   var query = 'UPDATE phenotypes SET frequency = ' + frequency + ', frequency_to = ' + frequencyTo + ', not_ok = 0 WHERE annotation_id = ' + annotationID + ' AND id = ' + phenotypeID;
