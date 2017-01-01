@@ -332,55 +332,113 @@ app.post('/signup', function (req, res, next) {
   var name = connection.escape(req.body.name);
   var email = connection.escape(req.body.email);
   var password = connection.escape(sha1(req.body.email + req.body.password));
+  var inviteJoinCode = null;
+  if (req.body.inviteJoinCode) {
+    inviteJoinCode = req.body.inviteJoinCode;
+  }
   var query0 = 'SELECT * FROM users WHERE email = ' + email + '; ';
   var query1 = 'SELECT * FROM `known_profs` WHERE email = ' + email + '; ';
   if (!validator.validate(req.body.email))
-    return res.json({ loginValid: false });
+    return res.json({ loginValid: false, invalidInviteJoinCode: false });
   connection.query(query0 + query1, function(err, rows) {
     if (err) throw err;
     if (rows[0].length > 0) {
       // Email has already been taken
-      return res.json({ loginValid: false });
+      return res.json({ loginValid: false, invalidInviteJoinCode: false });
     } else if (rows[1].length > 0) {
       // User is a known prof
-      var userLevel = 1;
+      req.userLevel = 1;
+      next();
     } else {
-      var userLevel = 0;
-    }
-    request.post({
-      url: 'http://community.phenotate.org/api/v1/users/',
-      json: true,
-      auth: {
-        'bearer': tokenNodeBB
-      },
-      body: {
-          username: req.body.email.replace('@', '-'),
-          password: sha1(req.body.password),
-          email: req.body.email,
-          _uid: 1
-      }
-    }, function (error, response, body) {
-      var communityUserID = -1;
-      if (!error && response.statusCode == 200) {
-  	    communityUserID = body.payload.uid;
-    	} else {
-        console.log('error11');
-      }
-      if (userLevel > 0) {
-        request.post({
-          url: 'http://community.phenotate.org/api/v1/groups/profs/membership',
-          json: true,
-          auth: {
-            'bearer': tokenNodeBB
-          },
-          body: {
-            _uid: communityUserID
+      req.userLevel = 0;
+      if (inviteJoinCode) {
+        // LOOK UP JOIN CODE
+        var query = 'SELECT id, prof_id FROM classes WHERE join_code = ' + inviteJoinCode;
+        connection.query(query, function(err, rows) {
+          if (err) throw err;
+          if (rows.length == 0 || rows[0].prof_id < 0) {
+            // LOOK UP INVITE CODE
+            query = 'SELECT * FROM invite_codes WHERE redeem_user_id IS NULL AND invite_code = ' + inviteJoinCode;
+            connection.query(query, function(err, rows) {
+              if (err) throw err;
+              if (rows.length == 0) {
+                return res.json({ loginValid: false, invalidInviteJoinCode: true });
+              } else {
+                req.userLevel = 1;
+                next();
+              }
+            });
+          } else {
+            next();
           }
         });
+      } else {
+        next();
       }
-      var query = 'INSERT INTO users (`full_name`, `email`, `password`, `level`, `community_user_id`) VALUES (' + name + ',' + email + ',' + password + ', ' + userLevel + ', ' + communityUserID + ')'
-      connection.query(query);
-      next();
+    }
+  });
+});
+
+app.post('/signup', function (req, res, next) {
+  var name = connection.escape(req.body.name);
+  var email = connection.escape(req.body.email);
+  var password = connection.escape(sha1(req.body.email + req.body.password));
+  request.post({
+    url: 'http://community.phenotate.org/api/v1/users/',
+    json: true,
+    auth: {
+      'bearer': tokenNodeBB
+    },
+    body: {
+        username: req.body.email.replace('@', '-'),
+        password: sha1(req.body.password),
+        email: req.body.email,
+        _uid: 1
+    }
+  }, function (error, response, body) {
+    var communityUserID = -1;
+    if (!error && response.statusCode == 200) {
+	    communityUserID = body.payload.uid;
+  	} else {
+      console.log('error11');
+    }
+    if (req.userLevel > 0) {
+      request.post({
+        url: 'http://community.phenotate.org/api/v1/groups/profs/membership',
+        json: true,
+        auth: {
+          'bearer': tokenNodeBB
+        },
+        body: {
+          _uid: communityUserID
+        }
+      });
+    }
+    var query = 'INSERT INTO users (`full_name`, `email`, `password`, `level`, `community_user_id`) VALUES (' + name + ',' + email + ',' + password + ', ' + req.userLevel + ', ' + communityUserID + ')'
+    connection.query(query, function(err, result) {
+      var userID = result.insertId;
+      // Join class if join code specified
+      if (req.body.inviteJoinCode) {
+        var inviteJoinCode = req.body.inviteJoinCode;
+        query = 'SELECT id, prof_id FROM classes WHERE join_code = ' + inviteJoinCode;
+        connection.query(query, function(err, rows) {
+          if (err) throw err;
+          if (rows.length == 0 || rows[0].prof_id < 0) {
+            // TRY INVITE CODE
+            query = 'UPDATE invite_codes SET redeem_user_id = ' + userID + ' WHERE redeem_user_id IS NULL AND invite_code = ' + inviteJoinCode;
+            connection.query(query);
+          } else {
+            // JOIN CODE OK
+            query = 'INSERT INTO students (`user_id`,`class_id`) VALUES (' + userID + ',' + rows[0].id + ')';
+            connection.query(query);
+            query = 'UPDATE classes SET deletable = 0 WHERE id = ' + rows[0].id;
+            connection.query(query);
+          }
+          next();
+        });
+      } else {
+        next();
+      }
     });
   });
 });
@@ -444,7 +502,7 @@ app.post('/restricted/change-password', function(req, res) {
       if (rows.length > 0) {
         query = 'UPDATE users SET password = ' + newPassword + ' WHERE id = ' + req.userID + ' AND password = ' + password;
         connection.query(query);
-        /*request.put({
+        request.put({
           url: 'http://community.phenotate.org/api/v1/users/' + communityUserID + '/password',
           json: true,
           auth: {
@@ -455,7 +513,7 @@ app.post('/restricted/change-password', function(req, res) {
               'new': req.body.newPassword,
               _uid: 1
           }
-        });*/
+        });
         res.json({passwordValid: true});
       } else {
         res.json({passwordValid: false});
@@ -474,9 +532,72 @@ app.post('/restricted/email-prefs', function(req, res) {
   }
 });
 
+app.post('/restricted/student/upgrade-account', function(req, res) {
+  var inviteCode = connection.escape(req.body.inviteCode);
+  var query = 'UPDATE invite_codes SET redeem_user_id = ' + req.userID + ' WHERE redeem_user_id IS NULL AND invite_code = ' + inviteCode;
+  connection.query(query, function(err, result) {
+    if (err) throw err;
+    if (result.changedRows > 0) {
+      query = 'UPDATE users SET level = 1 WHERE id = ' + req.userID;
+      connection.query(query);
+      query = 'SELECT community_user_id AS communityUserID FROM users WHERE id = ' + req.userID;
+      connection.query(query, function(err, rows) {
+        request.post({
+          url: 'http://community.phenotate.org/api/v1/groups/profs/membership',
+          json: true,
+          auth: {
+            'bearer': tokenNodeBB
+          },
+          body: {
+            _uid: rows[0].communityUserID
+          }
+        });
+        res.json({ success: true });
+      });
+    } else {
+      res.sendStatus(403);
+    }
+  });
+});
+
+app.post('/restricted/prof/invite-code/new', function(req, res) {
+  var query = 'SELECT * FROM invite_codes WHERE user_id = ' + req.userID;
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    if (rows.length >= 10) {
+      res.sendStatus(403);
+    } else {
+      query = 'INSERT INTO invite_codes (`invite_code`, `user_id`) SELECT FLOOR(100000000 + RAND() * 899999999) AS invite_code, ' + req.userID + ' FROM invite_codes WHERE "invite_code" NOT IN (SELECT join_code FROM classes) AND "invite_code" NOT IN (SELECT invite_code FROM invite_codes) LIMIT 1';
+      connection.query(query, function(err, result) {
+        if (err) throw err;
+        query = 'SELECT invite_codes.id AS inviteCodeID, invite_code AS inviteCode, DATE_FORMAT(invite_codes.date_created, \'%Y-%m-%d\') AS dateCreated, full_name AS redeemedByName, email AS redeemedByEmail FROM invite_codes LEFT JOIN users ON invite_codes.redeem_user_id = users.id WHERE invite_codes.id = ' + result.insertId;
+        connection.query(query, function(err, rows) {
+          if (err) throw err;
+          res.json(rows[0]);
+        });
+      });
+    }
+  });
+});
+
+app.post('/restricted/prof/invite-code/list', function(req, res) {
+  var query = 'SELECT invite_codes.id AS inviteCodeID, invite_code AS inviteCode, DATE_FORMAT(invite_codes.date_created, \'%Y-%m-%d\') AS dateCreated, full_name AS redeemedByName, email AS redeemedByEmail FROM invite_codes LEFT JOIN users ON invite_codes.redeem_user_id = users.id WHERE user_id = ' + req.userID;
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    res.json({ inviteCodes: rows });
+  });
+});
+
+app.post('/restricted/prof/invite-code/remove', function(req, res) {
+  var inviteCodeID = connection.escape(req.body.inviteCodeID);
+  var query = 'DELETE FROM invite_codes WHERE user_id = ' + req.userID + ' AND id = ' + inviteCodeID + ' AND redeem_user_id IS NULL';
+  connection.query(query);
+  res.json({ success: true });
+});
+
 app.post('/restricted/prof/new-class', function(req, res) {
   var name = connection.escape(req.body.name);
-  var query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS join_code FROM classes WHERE "join_code" NOT IN (SELECT join_code FROM classes) LIMIT 1';
+  var query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS join_code FROM classes WHERE "join_code" NOT IN (SELECT join_code FROM classes) AND "join_code" NOT IN (SELECT invite_code FROM invite_codes) LIMIT 1';
   connection.query(query, function(err, rows) {
     if (err) throw err;
     query = 'INSERT INTO classes (`name`,`prof_id`,`join_code`) VALUES (' + name + ',' + req.userID + ',' + rows[0].join_code + ')';
