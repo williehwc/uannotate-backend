@@ -45,6 +45,9 @@ var api_key = 'key-0000000000';
 var domain = 'phenotate.org';
 var mailgun = require('mailgun-js')({apiKey: api_key, domain: domain});
 
+var maxAdminID = 000; // Users with IDs this or below are considered admin
+var hpoUserIDs = [000, 000, 000]; // Users with these IDs only have HPO/OMIM/Orphanet annotations
+
 process.on('uncaughtException', function (err) {
   console.error(err);
 });
@@ -71,41 +74,50 @@ app.post('*', jsonParser, function (req, res, next) {
   next();
 });
 
-// OMIM lookup
-app.get('/solr/omim/:query', function (req, res) {
-	var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=omim&q=' + req.params.query;
-  request({
-      url: requestURL,
-      json: true
-    }, function (error, response, body) {
-    if (!error && response.statusCode == 200) {
-      var results = [];
-      var dbDiseases = [];
-      for (var i = 0; i < body.rows.length; i++) {
-        results.push(body.rows[i].name);
-        dbDiseases.push(parseInt(body.rows[i].id, 10));
-      }
-      var query = 'SELECT id AS diseaseID, db_disease, name, (SELECT COUNT(*) FROM annotations WHERE annotations.disease_id = diseaseID AND status = 2) AS quantity FROM diseases WHERE db_disease IN (' + dbDiseases.join() + ') AND db = \'omim\' ORDER BY FIELD (db_disease, ' + dbDiseases.join() + ')';
-      connection.query(query, function(err, rows) {
-        if (err) throw err;
-        var cursor = 0;
-        for (var i = 0; i < results.length; i++) {
-	      if (cursor < rows.length && rows[cursor].name == results[i] && rows[cursor].quantity == 1) {
-	        results[i] = results[i].concat(' (1 annotation)');
-	        cursor++;
-	      } else if (cursor < rows.length && rows[cursor].name == results[i]) {
-		    results[i] = results[i].concat(' (' + rows[cursor].quantity + ' annotations)');
-	        cursor++;
-	      } else {
-		    results[i] = results[i].concat(' (0 annotations)');
-	      }
+// OMIM/Orphanet lookup
+app.get('/solr/:db/:query', function (req, res, next) {
+  if (req.params.db == 'hpo') {
+    next();
+  } else {
+  	var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=' + req.params.db + '&q=' + req.params.query;
+    request({
+        url: requestURL,
+        json: true
+      }, function (error, response, body) {
+      if (!error && response.statusCode == 200 && body.rows.length > 0) {
+        var results = [];
+        var dbDiseases = [];
+        for (var i = 0; i < body.rows.length; i++) {
+          if (req.params.db == 'ordo') {
+            results.push('@' + body.rows[i].id.replace(/[^0-9]/g, '') + ' ' + body.rows[i].name);
+          } else if (req.params.db == 'omim') {
+            results.push((body.rows[i].symbol ? body.rows[i].symbol : '') + body.rows[i].id + ' ' + body.rows[i].name);
+          }
+          dbDiseases.push(parseInt(body.rows[i].id.replace(/[^0-9]/g, ''), 10));
         }
-        res.json({ matches: results });
-      });
-    } else {
-      console.log('error02');
-    }
-  });
+        var query = 'SELECT id AS diseaseID, db_disease, name, (SELECT COUNT(*) FROM annotations WHERE annotations.disease_id = diseaseID AND status = 2) AS quantity FROM diseases WHERE db_disease IN (' + dbDiseases.join() + ') AND db = \'' + req.params.db + '\' ORDER BY FIELD (db_disease, ' + dbDiseases.join() + ')';
+        connection.query(query, function(err, rows) {
+          if (err) throw err;
+          var cursor = 0;
+          for (var i = 0; i < results.length; i++) {
+    	      if (cursor < rows.length && rows[cursor].name == results[i] && rows[cursor].quantity == 1) {
+    	        results[i] = results[i].concat(' (1 annotation)');
+    	        cursor++;
+    	      } else if (cursor < rows.length && rows[cursor].name == results[i]) {
+    		      results[i] = results[i].concat(' (' + rows[cursor].quantity + ' annotations)');
+    	        cursor++;
+    	      } else {
+    		      results[i] = results[i].concat(' (0 annotations)');
+    	      }
+          }
+          res.json({ matches: results });
+        });
+      } else {
+        console.log('error02');
+        res.json({ matches: [] });
+      }
+    });
+  }
 });
 
 // HPO lookup
@@ -207,12 +219,11 @@ app.post('/browse', function (req, res) {
         });
       }
       generalPhenotypes = [];
-      for (var i = 0; i < req.currentPhenotype.is_a.length; i++) {
-        var split = req.currentPhenotype.is_a[i].split(' ! ');
+      for (var i = 0; i < req.currentPhenotype.parents.length; i++) {
         if (req.currentPhenotype.id != "HP:0000118") {
           generalPhenotypes.push({
-            hpo: split[0],
-            name: split[1]
+            hpo: req.currentPhenotype.parents[i].id,
+            name: req.currentPhenotype.parents[i].name
           });
         }
       }
@@ -326,6 +337,35 @@ app.post('*/prof/*', jsonParser, function (req, res, next) {
   if (req.userLevel < 1)
     return res.sendStatus(403);
   next();
+});
+
+app.post('/forgot-password', function (req, res) {
+  var email = connection.escape(req.body.email);
+  if (!validator.validate(req.body.email))
+    return res.sendStatus(403);
+  var temporaryPassword = "";
+  var possible = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (var i = 0; i < 10; i++)
+    temporaryPassword += possible.charAt(Math.floor(Math.random() * possible.length));
+  var resetKey = connection.escape(sha1(req.body.email + temporaryPassword));
+  var query = 'UPDATE users SET reset_key = ' + resetKey + ', reset_times = reset_times + 1 WHERE email = ' + email;
+  connection.query(query, function (err, result) {
+    if (err) throw err;
+    if (result.affectedRows > 0) {
+      mailgun.messages().send({
+        from: 'Phenotate <notifications@phenotate.org>',
+        to: req.body.email,
+        subject: 'Phenotate Password Reset',
+        text: 'If you have requested to reset your Phenotate password, please use this single-use password to log in: ' + temporaryPassword + '\nIf not, you can invalidate the single-use password by logging in normally.'
+      }, function (error, body) {
+        if (error)
+          console.log(error);
+        if (body)
+          console.log(body);
+      });
+    }
+  });
+  res.json({ success: true });
 });
 
 app.post('/signup', function (req, res, next) {
@@ -446,23 +486,31 @@ app.post('/signup', function (req, res, next) {
 app.post(['/login', '/signup'], function (req, res) {
   var email = connection.escape(req.body.email);
   var password = connection.escape(sha1(req.body.email + req.body.password));
-  var query = 'SELECT id, community_user_id FROM users WHERE email = ' + email + ' AND password = ' + password;
-  connection.query(query, function(err, rows) {
+  var query0 = 'SELECT id, community_user_id FROM users WHERE email = ' + email + ' AND password = ' + password + ';';
+  var query1 = 'SELECT id, community_user_id FROM users WHERE email = ' + email + ' AND reset_key = ' + password; // PASSWORD RESET KEY USED
+  connection.query(query0 + query1, function(err, rows) {
     if (err) throw err;
-    if (rows.length > 0) {
-      var userID = rows[0].id;
-      var communityUserID = rows[0].community_user_id;
-      query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS new_token FROM tokens WHERE "new_token" NOT IN (SELECT token FROM tokens) LIMIT 1';
+    if (rows[0].length > 0 || rows[1].length > 0) {
+      var resetKeyUsed = (rows[1].length > 0);
+      var userID = (!resetKeyUsed) ? rows[0][0].id : rows[1][0].id;
+      var communityUserID = (!resetKeyUsed) ? rows[0][0].community_user_id : rows[1][0].community_user_id;
+      var query = 'SELECT FLOOR(100000000 + RAND() * 899999999) AS new_token FROM tokens WHERE "new_token" NOT IN (SELECT token FROM tokens) LIMIT 1';
       connection.query(query, function(err, rows) {
         if (err) throw err;
         var query = 'INSERT INTO tokens (`token`, `user_id`) VALUES (' + rows[0].new_token + ',' + userID + ')';
         connection.query(query);
-        res.json({loginValid: true, token: rows[0].new_token, cookie: jwt.encode({
+        res.json({loginValid: true, token: rows[0].new_token, resetKeyUsed: resetKeyUsed, cookie: jwt.encode({
   	      "id": communityUserID,
   	      "username": req.body.email.replace('@', '-'),
   	      "email": req.body.email
         }, jwtSecret)});
       });
+      if (resetKeyUsed) {
+        query = "UPDATE users SET password = NULL WHERE id = " + userID;
+        connection.query(query);
+      }
+      query = "UPDATE users SET reset_key = NULL WHERE id = " + userID;
+      connection.query(query);
     } else {
       res.json({ loginValid: false });
       res.end();
@@ -477,14 +525,15 @@ app.post('/logout', function(req, res) {
 });
 
 app.post('/restricted/user', function(req, res) {
-  var query = 'SELECT full_name, level, email_follow, email_like FROM users WHERE id = ' + req.userID;
+  var query = 'SELECT full_name, level, email_follow, email_like, password FROM users WHERE id = ' + req.userID;
   connection.query(query, function(err, rows) {
     if (err) throw err;
     res.json({
       name: rows[0].full_name,
       level: rows[0].level,
       emailFollow: rows[0].email_follow,
-      emailLike: rows[0].email_like
+      emailLike: rows[0].email_like,
+      passwordReset: (rows[0].password) ? false : true
     });
   });
 });
@@ -496,11 +545,11 @@ app.post('/restricted/change-password', function(req, res) {
     var communityUserID = rows[0].communityUserID;
     var password = connection.escape(sha1(rows[0].email + req.body.password));
     var newPassword = connection.escape(sha1(rows[0].email + req.body.newPassword));
-    var query = 'SELECT email FROM users WHERE id = ' + req.userID + ' AND password = ' + password;
+    var query = 'SELECT email FROM users WHERE id = ' + req.userID + ' AND (password = ' + password + ' OR password IS NULL)';
     connection.query(query, function(err, rows) {
       if (err) throw err;
       if (rows.length > 0) {
-        query = 'UPDATE users SET password = ' + newPassword + ' WHERE id = ' + req.userID + ' AND password = ' + password;
+        query = 'UPDATE users SET password = ' + newPassword + ' WHERE id = ' + req.userID + ' AND (password = ' + password + ' OR password IS NULL)';
         connection.query(query);
         request.put({
           url: 'http://community.phenotate.org/api/v1/users/' + communityUserID + '/password',
@@ -668,12 +717,18 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
       json: true
     }, function (error, response, body) {
     if (!error && response.statusCode == 200 && body.rows.length > 0) {
-      var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id;
-      req.dbDisease = body.rows[0].id;
+      var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id.match(/\d+/)[0];
+      req.dbDisease = body.rows[0].id.match(/\d+/)[0];
       connection.query(query, function(err, rows) {
         if (err) throw err;
         if (rows.length == 0) {
-          query = 'INSERT INTO diseases (`db`,`db_disease`,`name`) VALUES ("' + vocabulary + '",' + body.rows[0].id + ',"' + body.rows[0].name + '")';
+          var diseaseName;
+          if (vocabulary == 'ordo') {
+            diseaseName = '@' + body.rows[0].id.replace(/[^0-9]/g, '') + ' ' + body.rows[0].name;
+          } else if (vocabulary == 'omim') {
+            diseaseName = (body.rows[0].symbol ? body.rows[0].symbol : '') + body.rows[0].id + ' ' + body.rows[0].name;
+          }
+          query = 'INSERT INTO diseases (`db`,`db_disease`,`name`) VALUES ("' + vocabulary + '",' + body.rows[0].id.match(/\d+/)[0] + ',"' + diseaseName + '")';
           connection.query(query, function(err, result) {
             if (err) throw err;
             query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + result.insertId + ',' + req.userID + ',1)';
@@ -806,9 +861,11 @@ app.post('/restricted/phenository/prof/diseases', function(req, res) {
 app.post('/restricted/phenository/prof/annotations', function(req, res) {
   var dbDisease = connection.escape(req.body.dbDisease);
   var vocabulary =  connection.escape(req.body.vocabulary);
-  var query = 'SELECT annotations.id AS annotationID, clone_of AS cloneOf, full_name AS author, (SELECT COUNT(*) FROM annotations WHERE clone_of = annotationID AND status = 2) AS numClones, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS date FROM annotations INNER JOIN users ON annotations.user_id = users.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE status = 2 AND db = ' + vocabulary + ' AND db_disease = ' + dbDisease;
+  var query = 'SELECT annotations.id AS annotationID, clone_of AS cloneOf, users.id AS authorID, full_name AS author, (SELECT COUNT(*) FROM annotations WHERE clone_of = annotationID AND status = 2) AS numClones, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS date FROM annotations INNER JOIN users ON annotations.user_id = users.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE status = 2 AND db = ' + vocabulary + ' AND db_disease = ' + dbDisease;
   connection.query(query, function(err, rows) {
     if (err) throw err;
+    for (var i = 0; i < rows.length; i++)
+      rows[i].authorAdmin = (rows[i].authorID <= maxAdminID);
     return res.json({ annotations: rows });
   });
 });
@@ -858,7 +915,7 @@ app.post('/restricted/annotation/view/full', function(req, res) {
   var query2 = 'SELECT annotations.id AS annotationID, user_id AS userID, full_name AS author, email, DATE_FORMAT(date_published, \'%Y-%m-%d\') AS datePublished FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE clone_of = ' + annotationID + ' AND status = 2;';
   var query3 = 'SELECT phenotypes.id AS phenotypeID, hpo, observed, frequency, frequency_to, onset, onset_to, not_ok, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' ORDER BY phenotypeID ASC;';
   var query4 = 'SELECT refs.id AS refID, pmid FROM refs WHERE annotation_id = ' + annotationID + ' ORDER BY refs.id ASC;';
-  var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ')';
+  var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ') AND user_id = ' + req.userID;
   connection.query(query0 + query1 + query2 + query3 + query4 + query5, function(err, rows) {
     if (err) throw err;
     if (rows[0].length == 0) {
@@ -938,7 +995,9 @@ app.post('/restricted/annotation/view/full', function(req, res) {
       author: {
         userID: rows[0][0].userID,
         userName: rows[0][0].author,
-        userEmail: rows[0][0].email
+        userEmail: rows[0][0].email,
+        userAdmin: (rows[0][0].userID <= maxAdminID),
+        userHPO: (hpoUserIDs.indexOf(rows[0][0].userID) >= 0)
       },
       dateCreated: rows[0][0].dateCreated,
       datePublished: rows[0][0].datePublished,
@@ -2386,7 +2445,7 @@ app.post('/restricted/class/prof/export-scores', function(req, res) {
         row.push(n);
         responseRows.push(row);
         if (cursor < rows[1].length)
-          row = [rows[1][i].userName];
+          row = [rows[1][cursor].userName];
         outOfRows.push(outOfRow);
         outOfRow = [null];
         column = 0;
@@ -2553,7 +2612,7 @@ app.post('/restricted/class/prof/remove-student', function(req, res) {
 app.post('/restricted/class/student/view', function(req, res) {
   var classID = connection.escape(req.body.classID);
   var query0 = 'SELECT name AS className FROM classes INNER JOIN students ON classes.id = students.class_id WHERE classes.id = ' + classID + ' AND user_id = ' + req.userID + ';';
-  var query1 = 'SELECT id AS exerciseID, name AS exerciseName, date_end AS dateEnd, (SELECT COUNT(*) FROM annotations WHERE exercise_id = exerciseID) AS numAnnotations, (SELECT status FROM annotations WHERE exercise_id = exerciseID LIMIT 1) AS status, (SELECT SUM(score) FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ' AND released = 1) AS sumScore, (SELECT COUNT(*) FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ' AND score IS NOT NULL AND released = 1) AS possibleScore FROM exercises WHERE class_id = ' + classID + ' AND date_start <= NOW() ORDER BY date_created ASC';
+  var query1 = 'SELECT id AS exerciseID, name AS exerciseName, date_end AS dateEnd, (SELECT COUNT(*) FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ') AS numAnnotations, (SELECT status FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ' LIMIT 1) AS status, (SELECT SUM(score) FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ' AND released = 1) AS sumScore, (SELECT COUNT(*) FROM annotations WHERE exercise_id = exerciseID AND user_id = ' + req.userID + ' AND score IS NOT NULL AND released = 1) AS possibleScore FROM exercises WHERE class_id = ' + classID + ' AND date_start <= NOW() ORDER BY date_created ASC';
   connection.query(query0 + query1, function(err, rows) {
     if (err) throw err;
     if (rows[0].length == 0)
@@ -2833,11 +2892,17 @@ app.post('/restricted/exercise/prof/problem/add', function(req, res, next) {
       json: true
     }, function (error, response, body) {
     if (!error && response.statusCode == 200 && body.rows.length > 0) {
-      var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id;
+      var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id.match(/\d+/)[0];
       connection.query(query, function(err, rows) {
         if (err) throw err;
         if (rows.length == 0) {
-          query = 'INSERT INTO diseases (`db`,`db_disease`,`name`) VALUES ("' + vocabulary + '",' + body.rows[0].id + ',"' + body.rows[0].name + '")';
+          var diseaseName;
+          if (vocabulary == 'ordo') {
+            diseaseName = '@' + body.rows[0].id.replace(/[^0-9]/g, '') + ' ' + body.rows[0].name;
+          } else if (vocabulary == 'omim') {
+            diseaseName = (body.rows[0].symbol ? body.rows[0].symbol : '') + body.rows[0].id + ' ' + body.rows[0].name;
+          }
+          query = 'INSERT INTO diseases (`db`,`db_disease`,`name`) VALUES ("' + vocabulary + '",' + body.rows[0].id.match(/\d+/)[0] + ',"' + diseaseName + '")';
           connection.query(query, function(err, result) {
             if (err) throw err;
             query = 'INSERT INTO problems (`disease_id`,`exercise_id`,`position`) VALUES (' + result.insertId + ',' + req.exerciseID + ',' + req.position + ')';
@@ -2904,7 +2969,7 @@ app.post('/restricted/exercise/student/open', function(req, res) {
   var query0 = 'SELECT exercises.id FROM exercises INNER JOIN classes ON exercises.class_id = classes.id INNER JOIN students ON classes.id = students.class_id WHERE exercises.id = ' + exerciseID + ' AND classes.id = ' + classID + ' AND user_id = ' + req.userID + ' AND date_start <= NOW();';
   var query1 = 'SELECT exercises.id FROM exercises INNER JOIN classes ON exercises.class_id = classes.id INNER JOIN students ON classes.id = students.class_id WHERE exercises.id = ' + exerciseID + ' AND classes.id = ' + classID + ' AND user_id = ' + req.userID + ' AND date_start <= NOW() AND (date_end IS NULL OR date_end > NOW());';
   var query2 = 'SELECT id FROM problems WHERE exercise_id = ' + exerciseID + ';';
-  var query3 = 'SELECT annotations.id AS annotationID FROM annotations WHERE exercise_id = ' + exerciseID + ' ORDER BY id ASC LIMIT 1';
+  var query3 = 'SELECT annotations.id AS annotationID FROM annotations WHERE exercise_id = ' + exerciseID + ' AND user_id = ' + req.userID + ' ORDER BY id ASC LIMIT 1';
   connection.query(query0 + query1 + query2 + query3, function(err, rows) {
     if (err) throw err;
     if (rows[0].length == 0 || rows[2].length == 0 || (rows[1].length == 0 && rows[3].length == 0))
@@ -2926,11 +2991,11 @@ app.post('/restricted/exercise/student/submit', function(req, res) {
   if (req.annotationStatus > 0)
     return res.sendStatus(403);
   // Check if there is at least one phenotype
-  var query0 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM phenotypes WHERE phenotypes.annotation_id = annotationID) AS numPhenotypes, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ';';
+  var query0 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM phenotypes WHERE phenotypes.annotation_id = annotationID) AS numPhenotypes, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ' AND user_id = ' + req.userID + ';';
   // Check if each phenotype is cited
-  var query1 = 'SELECT phenotypes.id AS phenotypeID, annotations.id AS annotationID, (SELECT COUNT(*) FROM citations WHERE citations.phenotype_id = phenotypeID) AS numCitations, name AS diseaseName FROM phenotypes INNER JOIN annotations ON phenotypes.annotation_id = annotations.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ' ORDER BY diseaseName;';
+  var query1 = 'SELECT phenotypes.id AS phenotypeID, annotations.id AS annotationID, (SELECT COUNT(*) FROM citations WHERE citations.phenotype_id = phenotypeID) AS numCitations, name AS diseaseName FROM phenotypes INNER JOIN annotations ON phenotypes.annotation_id = annotations.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ' AND user_id = ' + req.userID + ' ORDER BY diseaseName;';
   // Check if each ref is used
-  var query2 = 'SELECT refs.id AS refID, annotations.id AS annotationID, (SELECT COUNT(*) FROM citations WHERE citations.ref_id = refID) AS numCitations, name AS diseaseName FROM refs INNER JOIN annotations ON refs.annotation_id = annotations.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ' ORDER BY diseaseName, refs.id ASC;';
+  var query2 = 'SELECT refs.id AS refID, annotations.id AS annotationID, (SELECT COUNT(*) FROM citations WHERE citations.ref_id = refID) AS numCitations, name AS diseaseName FROM refs INNER JOIN annotations ON refs.annotation_id = annotations.id INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id = ' + exerciseID + ' AND user_id = ' + req.userID + ' ORDER BY diseaseName, refs.id ASC;';
   var query3 = 'SELECT name AS exerciseName FROM exercises WHERE id = ' + exerciseID;
   connection.query(query0 + query1 + query2 + query3, function(err, rows) {
     if (err) throw err;
@@ -2971,7 +3036,7 @@ app.post('/restricted/exercise/student/submit', function(req, res) {
       refNumber++;
     }
     if (missingPhenotypes.length == 0 && uncitedPhenotypes.length == 0 && unusedRefs.length == 0 && submit) {
-      var query = 'UPDATE annotations SET status = -2, date_published = NOW() WHERE exercise_id = ' + exerciseID;
+      var query = 'UPDATE annotations SET status = -2, date_published = NOW() WHERE exercise_id = ' + exerciseID + ' AND user_id = ' + req.userID;
       connection.query(query);
       success = true;
     }
@@ -3021,9 +3086,9 @@ app.post('/restricted/student/dashboard', function(req, res) {
 });
 
 app.post('/restricted/prof/dashboard', function(req, res) {
-  var query0 = 'SELECT annotations.id AS annotationID, diseases.db AS diseaseDB, diseases.name AS diseaseName, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id LEFT JOIN follows ON diseases.db = follows.db AND diseases.db_disease = follows.db_disease WHERE status = 2 AND follows.user_id = ' + req.userID + ' ORDER BY date_published DESC LIMIT 5;';
-  var query1 = 'SELECT annotations.id AS annotationID, diseases.db AS diseaseDB, diseases.name AS diseaseName, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id WHERE status = 2 ORDER BY date_published DESC LIMIT 5;';
-  var query2 = 'SELECT annotations.id AS annotationID, db AS diseaseDB, name AS diseaseName, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id WHERE status = 2 AND clone_of IN (SELECT id FROM annotations WHERE user_id = ' + req.userID + ') AND user_id != ' + req.userID + ' ORDER BY date_published DESC LIMIT 5;';
+  var query0 = 'SELECT annotations.id AS annotationID, diseases.db AS diseaseDB, diseases.name AS diseaseName, users.id AS authorID, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id LEFT JOIN follows ON diseases.db = follows.db AND diseases.db_disease = follows.db_disease WHERE status = 2 AND follows.user_id = ' + req.userID + ' ORDER BY date_published DESC LIMIT 5;';
+  var query1 = 'SELECT annotations.id AS annotationID, diseases.db AS diseaseDB, diseases.name AS diseaseName, users.id AS authorID, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id WHERE status = 2 ORDER BY date_published DESC LIMIT 5;';
+  var query2 = 'SELECT annotations.id AS annotationID, db AS diseaseDB, name AS diseaseName, users.id AS authorID, full_name AS authorName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id INNER JOIN users ON user_id = users.id WHERE status = 2 AND clone_of IN (SELECT id FROM annotations WHERE user_id = ' + req.userID + ') AND user_id != ' + req.userID + ' ORDER BY date_published DESC LIMIT 5;';
   var query3 = 'SELECT exercises.id AS exerciseID, exercises.name AS exerciseName, classes.id AS classID, classes.name AS className, (SELECT COUNT(DISTINCT user_id) FROM annotations WHERE exercise_id = exerciseID AND status = -2) AS numSubmissions FROM exercises INNER JOIN classes ON exercises.class_id = classes.id WHERE prof_id = ' + req.userID + ' ORDER BY date_start DESC LIMIT 5';
   connection.query(query0 + query1 + query2 + query3, function(err, rows) {
     if (err) throw err;
@@ -3033,7 +3098,8 @@ app.post('/restricted/prof/dashboard', function(req, res) {
         annotationID: rows[0][i].annotationID,
         diseaseDB: rows[0][i].diseaseDB,
         diseaseName: rows[0][i].diseaseName,
-        authorName: rows[0][i].authorName
+        authorName: rows[0][i].authorName,
+        authorAdmin: (rows[0][i].authorID <= maxAdminID)
       });
     }
     var latestAnnotations = [];
@@ -3042,7 +3108,8 @@ app.post('/restricted/prof/dashboard', function(req, res) {
         annotationID: rows[1][i].annotationID,
         diseaseDB: rows[1][i].diseaseDB,
         diseaseName: rows[1][i].diseaseName,
-        authorName: rows[1][i].authorName
+        authorName: rows[1][i].authorName,
+        authorAdmin: (rows[1][i].authorID <= maxAdminID)
       });
     }
     var cloneAnnotations = [];
@@ -3051,7 +3118,8 @@ app.post('/restricted/prof/dashboard', function(req, res) {
         annotationID: rows[2][i].annotationID,
         diseaseDB: rows[2][i].diseaseDB,
         diseaseName: rows[2][i].diseaseName,
-        authorName: rows[2][i].authorName
+        authorName: rows[2][i].authorName,
+        authorAdmin: (rows[2][i].authorID <= maxAdminID)
       });
     }
     var exercises = [];
