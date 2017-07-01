@@ -52,10 +52,24 @@ process.on('uncaughtException', function (err) {
   console.error(err);
 });
 
-// Ensure uptime
+// Used for ensuring uptime (and do some routine tasks while we're at it)
 app.get('/check', function (req, res) {
+  // Routine task 1: Delete temporarily-published annotations
+  var query = 'SELECT id FROM annotations WHERE DATEDIFF(CURDATE(), date_created) > 7 AND status = 3 AND id NOT IN (SELECT compare_to_annotation_id FROM annotations WHERE compare_to_annotation_id IS NOT NULL) AND id NOT IN (SELECT annotation_id FROM shares WHERE annotation_id IS NOT NULL)';
+  connection.query(query, function(err, rows) {
+    if (err) throw err;
+    for (var i = 0; i < rows.length; i++) {
+      var query0 = 'DELETE c FROM citations c INNER JOIN refs ON c.ref_id = refs.id WHERE annotation_id = ' + rows[i].id + ';';
+      var query1 = 'DELETE FROM refs WHERE annotation_id = ' + rows[i].id + ';';
+      var query2 = 'DELETE FROM phenotypes WHERE annotation_id = ' + rows[i].id + ';';
+      var query3 = 'DELETE FROM annotations WHERE id = ' + rows[i].id;
+      connection.query(query0 + query1 + query2 + query3);
+    }
+  });
+  // Routine task 2: Delete outdated tokens
   var query = 'DELETE FROM tokens WHERE DATEDIFF(CURDATE(), date_created) > 7';
   connection.query(query);
+  // Check the number of tokens
   query = 'SELECT COUNT(*) AS count FROM tokens';
   connection.query(query, function(err, rows) {
     if (err) throw err;
@@ -710,6 +724,9 @@ app.post('/restricted/classes/student/join-class', function(req, res) {
 app.post('/restricted/annotations/prof/new-annotation', function(req, res, next) {
   var diseaseName = req.body.diseaseName.replace(/[^a-zA-Z0-9 ]/g, '');
   var vocabulary =  req.body.vocabulary.replace(/[^a-zA-Z ]/g, '');
+  var status = 1;
+  if (req.body.publishTemporarily)
+    status = 3;
   // Look up disease name on Solr
   var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=' + vocabulary + '&q=' + diseaseName;
   request({
@@ -718,6 +735,7 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
     }, function (error, response, body) {
     if (!error && response.statusCode == 200 && body.rows.length > 0) {
       var query = 'SELECT id FROM diseases WHERE db = "' + vocabulary + '" AND db_disease = ' + body.rows[0].id.match(/\d+/)[0];
+      req.diseaseDB = vocabulary;
       req.dbDisease = body.rows[0].id.match(/\d+/)[0];
       connection.query(query, function(err, rows) {
         if (err) throw err;
@@ -731,7 +749,7 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
           query = 'INSERT INTO diseases (`db`,`db_disease`,`name`) VALUES ("' + vocabulary + '",' + body.rows[0].id.match(/\d+/)[0] + ',"' + diseaseName + '")';
           connection.query(query, function(err, result) {
             if (err) throw err;
-            query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + result.insertId + ',' + req.userID + ',1)';
+            query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + result.insertId + ',' + req.userID + ',' + status + ')';
             connection.query(query, function(err, result) {
               if (err) throw err;
               req.annotationID = result.insertId;
@@ -740,12 +758,16 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
             });
           });
         } else {
-          query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + rows[0].id + ',' + req.userID + ',1)';
+          query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + rows[0].id + ',' + req.userID + ',' + status + ')';
           connection.query(query, function(err, result) {
             if (err) throw err;
-            req.annotationID = result.insertId;
-            req.solrBody = body;
-            next();
+            if (req.body.startFromScratch) {
+              return res.json({ success: true, annotationID: result.insertId });
+            } else {
+              req.annotationID = result.insertId;
+              req.solrBody = body;
+              next(); // Continued ~1000 lines later
+            }
           });
         }
       });
@@ -753,36 +775,10 @@ app.post('/restricted/annotations/prof/new-annotation', function(req, res, next)
   });
 });
 
-app.post('/restricted/annotations/prof/new-annotation', function(req, res) {
-  var annotationID = req.annotationID;
-  var actualSymptoms = req.solrBody.rows[0].actual_symptom;
-  var actualNotSymptoms = req.solrBody.rows[0].actual_not_symptom;
-  var insertedSymptoms = ['foobar'];
-  if (actualSymptoms) {
-    for (var i = 0; i < actualSymptoms.length; i++) {
-      if (insertedSymptoms.indexOf(actualSymptoms[i]) > 0)
-        continue;
-      var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM imports WHERE db = ' + connection.escape(req.body.vocabulary.toUpperCase()) + ' AND db_disease = ' + req.dbDisease + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ' LIMIT 1; INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1 FROM phenotypes WHERE NOT EXISTS (SELECT * FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ') LIMIT 1';
-      connection.query(query);
-      insertedSymptoms.push(actualSymptoms[i]);
-    }
-  }
-  if (actualNotSymptoms) {
-    for (var i = 0; i < actualNotSymptoms.length; i++) {
-      if (insertedSymptoms.indexOf(actualNotSymptoms[i]) > 0)
-        continue;
-      var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) VALUES (' + annotationID + ',' + connection.escape(actualNotSymptoms[i]) + ', 0, 1)';
-      connection.query(query);
-      insertedSymptoms.push(actualNotSymptoms[i]);
-    }
-  }
-  return res.json({ success: true, annotationID: annotationID });
-});
-
 app.post('/restricted/annotations/prof/list', function(req, res) {
   var myAnnotations = [];
   var nameCounter = 0;
-  var query = 'SELECT annotations.id, db, db_disease, name, status, DATE_FORMAT(date_created, \'%Y-%m-%d\') AS date_created FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE user_id = ' + req.userID;
+  var query = 'SELECT annotations.id, db, db_disease, name, status, DATE_FORMAT(date_created, \'%Y-%m-%d\') AS date_created FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE user_id = ' + req.userID + ' AND status != 3';
   connection.query(query, function(err, rows) {
     if (err) throw err;
     for (var i = 0; i < rows.length; i++) {
@@ -896,7 +892,7 @@ app.post('/restricted/annotation/*', function(req, res, next) {
 });
 
 app.post('/restricted/annotation/edit/*', function(req, res, next) {
-  if (req.annotationStatus == 2 || req.annotationStatus == -2)
+  if (req.annotationStatus == 3 || req.annotationStatus == 2 || req.annotationStatus == -2)
     return res.sendStatus(403);
   var query = 'SELECT status FROM annotations WHERE id = ' + req.annotationID + ' AND user_id = ' + req.userID;
   connection.query(query, function(err, rows) {
@@ -1432,6 +1428,9 @@ app.post('/restricted/annotation/prof/unshare', function(req, res) {
     return res.sendStatus(403);
   var query = 'DELETE FROM shares WHERE annotation_id = ' + annotationID + ' AND user_id = ' + req.userID;
   connection.query(query);
+  // For temporarily-published annotations
+  query = 'UPDATE annotations SET date_created = NOW() WHERE id = ' + annotationID + ' AND user_id = ' + req.userID + ' AND status = 3';
+  connection.query(query);
   res.json({ success: true });
 });
 
@@ -1569,6 +1568,86 @@ app.post('/restricted/annotation/system', function(req, res, next) {
       }
     });
   });
+});
+
+app.post('/restricted/annotation/compare', function(req, res, next) {
+  var annotationID = req.annotationID;
+  // Retrieve existing OMIM/ORDO annotation
+  if (req.annotationStatus != 3) {
+    var query = "SELECT db, db_disease FROM diseases WHERE id = " + req.diseaseID;
+    connection.query(query, function(err, rows) {
+      if (err) throw err;
+      if (rows.length > 0) {
+        // Look up disease name on Solr
+        req.diseaseDB = rows[0].db;
+        req.dbDisease = rows[0].db_disease;
+        var requestURL = 'https://playground.phenotips.org/get/PhenoTips/SolrService?vocabulary=' + rows[0].db + '&q=' + rows[0].db_disease;
+        request({
+            url: requestURL,
+            json: true
+          }, function (error, response, body) {
+          if (!error && response.statusCode == 200 && body.rows.length > 0) {
+            var query = 'SELECT id FROM annotations WHERE disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ') AND status = 3 ORDER BY date_created DESC';
+            connection.query(query, function(err, rows) {
+              // Make a new annotation for temporary publishing
+              if (rows.length > 0) {
+                req.comparePublishTemporarilyAnnotationID = rows[0].id;
+                next();
+              } else {
+                query = 'INSERT INTO annotations (`disease_id`,`user_id`,`status`) VALUES (' + req.diseaseID + ',' + req.userID + ',3)';
+                connection.query(query, function(err, result) {
+                  if (err) throw err;
+                  req.comparePublishTemporarilyAnnotationID = result.insertId;
+                  req.solrBody = body;
+                  next();
+                });
+              }
+            });
+          } else {
+            next();
+          }
+        });
+      } else {
+        next();
+      }
+    });
+  } else {
+    next();
+  }
+});
+
+app.post(['/restricted/annotations/prof/new-annotation', '/restricted/annotation/compare'], function(req, res, next) {
+  if (req.solrBody) {
+    var annotationID = req.annotationID;
+    if (req.comparePublishTemporarilyAnnotationID)
+      annotationID = req.comparePublishTemporarilyAnnotationID;
+    var actualSymptoms = req.solrBody.rows[0].actual_symptom;
+    var actualNotSymptoms = req.solrBody.rows[0].actual_not_symptom;
+    var insertedSymptoms = ['foobar'];
+    if (actualSymptoms) {
+      for (var i = 0; i < actualSymptoms.length; i++) {
+        if (insertedSymptoms.indexOf(actualSymptoms[i]) > 0)
+          continue;
+        var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1, frequency, frequency_to, onset, onset_to, specific_onset, progression, severity, temporal_pattern, spatial_pattern, laterality FROM imports WHERE db = ' + connection.escape(req.diseaseDB.toUpperCase()) + ' AND db_disease = ' + req.dbDisease + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ' LIMIT 1; INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) SELECT ' + annotationID + ',' + connection.escape(actualSymptoms[i]) + ', 1, 1 FROM phenotypes WHERE NOT EXISTS (SELECT * FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND hpo = ' + connection.escape(actualSymptoms[i]) + ') LIMIT 1';
+        connection.query(query);
+        insertedSymptoms.push(actualSymptoms[i]);
+      }
+    }
+    if (actualNotSymptoms) {
+      for (var i = 0; i < actualNotSymptoms.length; i++) {
+        if (insertedSymptoms.indexOf(actualNotSymptoms[i]) > 0)
+          continue;
+        var query = 'INSERT INTO phenotypes (annotation_id, hpo, observed, not_ok) VALUES (' + annotationID + ',' + connection.escape(actualNotSymptoms[i]) + ', 0, 1)';
+        connection.query(query);
+        insertedSymptoms.push(actualNotSymptoms[i]);
+      }
+    }
+  }
+  next();
+});
+
+app.post('/restricted/annotations/prof/new-annotation', function(req, res) {
+  return res.json({ success: true, annotationID: req.annotationID });
 });
 
 app.post('/restricted/annotation/compare', function(req, res) {
@@ -1846,6 +1925,7 @@ app.post('/restricted/annotation/compare', function(req, res) {
   // Check if compareToAnnotationID is valid, and, if not, look for a suitable one
   var annotationID = req.annotationID;
   var compareToAnnotationID = req.body.compareToAnnotationID;
+  console.log("BEFORE: " + annotationID + " VS " + compareToAnnotationID);
   var query0 = 'SELECT id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ') AND id != ' + annotationID + ';';
   var query1 = 'SELECT id AS annotationID, clone_of AS cloneOf, compare_to_annotation_id AS compareToAnnotationID, status FROM annotations WHERE id = ' + annotationID + ';';
   var query2 = 'SELECT id AS annotationID, compare_to_annotation_id AS compareToAnnotationID FROM annotations WHERE compare_to_annotation_id = ' + annotationID;
@@ -1864,21 +1944,31 @@ app.post('/restricted/annotation/compare', function(req, res) {
         mostLikesAnnotationID = rows[0][i].annotationID;
       }
     }
-    if (annotationID != compareToAnnotationID && !found) {
-      if (rows[1][0].cloneOf && !found)
+    if (req.comparePublishTemporarilyAnnotationID && compareToAnnotationID == req.comparePublishTemporarilyAnnotationID)
+      found = true;
+    if (req.annotationStatus < 0 && annotationID == compareToAnnotationID)
+      found = true;
+    if (!found) {
+      if (rows[1][0].cloneOf) {
         compareToAnnotationID = rows[1][0].cloneOf;
-      else if (rows[1][0].compareToAnnotationID && !found)
+      } else if (rows[1][0].compareToAnnotationID) {
         compareToAnnotationID = rows[1][0].compareToAnnotationID;
-      else if (annotationID != compareToAnnotationID && !found)
+      } else if (annotationID != mostLikesAnnotationID) {
         compareToAnnotationID = mostLikesAnnotationID;
+      } else if (req.comparePublishTemporarilyAnnotationID) {
+        compareToAnnotationID = req.comparePublishTemporarilyAnnotationID;
+      } else {
+        compareToAnnotationID = annotationID
+      }
     }
+    console.log("AFTER: " + annotationID + " VS " + compareToAnnotationID);
     if (req.userLevel < 1) {
       if (rows[1][0].compareToAnnotationID) {
         compareToAnnotationID = rows[1][0].compareToAnnotationID;
       } else {
         compareToAnnotationID = rows[1][0].annotationID;
       }
-      if (rows[1][0].status == 2) {
+      if (rows[1][0].status >= 2) {
         annotationID = rows[2][0].annotationID;
         compareToAnnotationID = rows[2][0].compareToAnnotationID;
       }
@@ -1887,12 +1977,11 @@ app.post('/restricted/annotation/compare', function(req, res) {
     var query1 = 'SELECT annotations.id AS annotationID, full_name AS userName FROM annotations INNER JOIN users ON annotations.user_id = users.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ') AND status = -2 GROUP BY user_id;';
     var query2 = 'SELECT annotations.id AS annotationID, (SELECT COUNT(*) FROM likes WHERE annotation_id = annotationID) AS numLikes FROM annotations WHERE status = 2 AND annotations.id != ' + annotationID + ' AND disease_id IN (SELECT disease_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
     var query3 = 'SELECT hpo, observed, frequency, frequency_to AS frequencyTo, onset, onset_to AS onsetTo, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + annotationID + ' AND system IS NOT NULL;';
-    var query4 = query3;
-    if (rows[0].length > 0)
-      query4 = 'SELECT hpo, observed, frequency, frequency_to AS frequencyTo, onset, onset_to AS onsetTo, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + compareToAnnotationID + ' AND system IS NOT NULL;';
+    var query4 = 'SELECT hpo, observed, frequency, frequency_to AS frequencyTo, onset, onset_to AS onsetTo, system AS systemHPO, specific_onset AS specificOnset, progression, severity, temporal_pattern AS temporalPattern, spatial_pattern AS spatialPattern, laterality FROM phenotypes WHERE annotation_id = ' + compareToAnnotationID + ' AND system IS NOT NULL;';
     var query5 = 'SELECT annotations.id AS annotationID, name AS diseaseName FROM annotations INNER JOIN diseases ON annotations.disease_id = diseases.id WHERE exercise_id IN (SELECT exercise_id FROM annotations WHERE annotations.id = ' + annotationID + ');';
-    var query6 = 'SELECT hpo AS systemHPO, score AS systemScore, memo AS systemComment FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID;
-    connection.query(query0 + query1 + query2 + query3 + query4 + query5 + query6, function(err, rows) {
+    var query6 = 'SELECT hpo AS systemHPO, score AS systemScore, memo AS systemComment FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ';';
+    var query7 = 'SELECT COUNT(*) AS numLikes FROM likes WHERE annotation_id = ' + compareToAnnotationID;
+    connection.query(query0 + query1 + query2 + query3 + query4 + query5 + query6 + query7, function(err, rows) {
       if (err) throw err;
       // All submissions and annotations
       var submissions = [];
@@ -1908,6 +1997,12 @@ app.post('/restricted/annotation/compare', function(req, res) {
           annotations.push({
             annotationID: rows[2][i].annotationID,
             numLikes: rows[2][i].numLikes
+          });
+        }
+        if (req.annotationStatus != 3 && req.comparePublishTemporarilyAnnotationID) {
+          annotations.push({
+            annotationID: req.comparePublishTemporarilyAnnotationID,
+            numLikes: -1
           });
         }
       }
@@ -2000,6 +2095,7 @@ app.post('/restricted/annotation/compare', function(req, res) {
       var comparison = {
         annotationID: rows[0][0].annotationID,
         compareToAnnotationID: parseInt(compareToAnnotationID, 10),
+        compareToNumLikes: (compareToAnnotationID == req.comparePublishTemporarilyAnnotationID) ? -1 : rows[7][0].numLikes,
         exerciseID: rows[0][0].exerciseID,
         exerciseName: rows[0][0].exerciseName,
         classID: rows[0][0].classID,
@@ -2139,7 +2235,7 @@ app.post('/restricted/annotation/prof/comment/system', function(req, res) {
   var comment = connection.escape(req.body.comment);
   // First, check if compareToAnnotationID is valid (i.e. published and of the same disease)
   // Also, check if system HPO is valid (i.e. one or more phenotypes belong to it)
-  var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
+  var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status >= 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
   var query1 = 'SELECT id FROM phenotypes WHERE system = ' + systemHPO + ' AND (annotation_id = ' + annotationID + ' OR annotation_id = ' + compareToAnnotationID + ')';
   connection.query(query0 + query1, function(err, rows) {
     if (err) throw err;
@@ -2162,7 +2258,7 @@ app.post('/restricted/annotation/prof/score/system', function(req, res) {
     return res.sendStatus(403);
   // First, check if compareToAnnotationID is valid (i.e. published and of the same disease)
   // Also, check if system HPO is valid (i.e. one or more phenotypes belong to it)
-  var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
+  var query0 = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status >= 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + compareToAnnotationID + ');';
   var query1 = 'SELECT id FROM phenotypes WHERE system = ' + systemHPO + ' AND (annotation_id = ' + annotationID + ' OR annotation_id = ' + compareToAnnotationID + ');';
   var query2 = 'SELECT memo FROM system_scores WHERE annotation_id = ' + annotationID + ' AND compare_to_annotation_id = ' + compareToAnnotationID + ' AND hpo = ' + systemHPO + ' AND memo IS NOT NULL';
   connection.query(query0 + query1 + query2, function(err, rows) {
@@ -2192,7 +2288,7 @@ app.post('/restricted/annotation/prof/score/save', function(req, res) {
   if (req.body.score < 0 || req.body.score > 1)
     return res.sendStatus(403);
   if (req.body.compareToAnnotationID) {
-    var query = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status = 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ');';
+    var query = 'SELECT id FROM annotations WHERE id = ' + compareToAnnotationID + ' AND status >= 2 AND disease_id IN (SELECT disease_id FROM annotations WHERE id = ' + annotationID + ');';
     connection.query(query, function(err, rows) {
       if (err) throw err;
       if (annotationID == compareToAnnotationID || rows.length > 0) {
