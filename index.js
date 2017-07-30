@@ -225,10 +225,12 @@ app.get('/solr/:db/:query', function (req, res, next) {
             if (err) throw err;
             var cursor = 0;
             for (var i = 0; i < results.length; i++) {
-      	      if (cursor < rows.length && rows[cursor].name == results[i] && rows[cursor].quantity == 1) {
+              var diseaseNameWords = results[i].replace(/[^a-zA-Z0-9 ]/g, '').split(' ');
+              var diseaseID = diseaseNameWords[0];
+      	      if (cursor < rows.length && rows[cursor].db_disease == diseaseID && rows[cursor].quantity == 1) {
       	        results[i] = results[i].concat(' (1 annotation)');
       	        cursor++;
-      	      } else if (cursor < rows.length && rows[cursor].name == results[i]) {
+      	      } else if (cursor < rows.length && rows[cursor].db_disease == diseaseID) {
       		      results[i] = results[i].concat(' (' + rows[cursor].quantity + ' annotations)');
       	        cursor++;
       	      } else {
